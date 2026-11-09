@@ -62,6 +62,52 @@ export function seatScenario(db: TestDb) {
         .get();
     },
 
+    /** Gives a course one module of `count` lessons. */
+    lessons(course: { id: number }, count: number) {
+      const module = db
+        .insert(schema.modules)
+        .values({ courseId: course.id, title: "Module 1", position: 1 })
+        .returning()
+        .get();
+      return Array.from({ length: count }, (_, i) =>
+        db
+          .insert(schema.lessons)
+          .values({ moduleId: module.id, title: `Lesson ${i + 1}`, position: i })
+          .returning()
+          .get()
+      );
+    },
+
+    /** A Student's video reaches `positionSeconds` in a lesson. */
+    watch(
+      student: { id: number },
+      lesson: { id: number },
+      positionSeconds: number,
+      at: string
+    ) {
+      db.insert(schema.videoWatchEvents)
+        .values({
+          userId: student.id,
+          lessonId: lesson.id,
+          eventType: "progress",
+          positionSeconds,
+          createdAt: at,
+        })
+        .run();
+    },
+
+    /** A Student completes a lesson. */
+    completeLesson(student: { id: number }, lesson: { id: number }, at: string) {
+      db.insert(schema.lessonProgress)
+        .values({
+          userId: student.id,
+          lessonId: lesson.id,
+          status: schema.LessonProgressStatus.Completed,
+          completedAt: at,
+        })
+        .run();
+    },
+
     /** A Buyer pays for a Purchase of `seatCount` Seats. */
     purchase(
       buyer: { id: number },

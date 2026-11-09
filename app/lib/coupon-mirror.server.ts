@@ -3,12 +3,11 @@ import { db } from "~/db";
 import { coupons, teamMembers, teams, TeamMemberRole } from "~/db/schema";
 import type { MadePurchase } from "~/lib/seats.server";
 
-// Temporary (spec #11, issue #13): the refund checks (courses.$slug and
-// courses.$slug.refund) still read coupons; the seats and analytics pages read
-// Seats since #14 and #19. Until those move to the seats module, every Seat
-// bought through a Purchase of several Seats is also written as a coupon with
-// the same code, and every Enrollment with a Seat Code marks that coupon as
-// redeemed. Delete this file when teams and coupons are dropped.
+// Temporary (spec #11, issue #13): every Seat bought through a Purchase of
+// several Seats is also written as a coupon with the same code, and every
+// Enrollment with a Seat Code marks that coupon as redeemed. Since #17 moved
+// Refund Requests to Seats, nothing reads coupons any more. Delete this file
+// and its two callers when teams and coupons are dropped.
 
 /** Writes the Seats of a Purchase as coupons of the Buyer's team. */
 export function mirrorSeatsAsCoupons(

@@ -1,9 +1,13 @@
-import { useState } from "react";
-import { Link, data, isRouteErrorResponse } from "react-router";
+import { useEffect, useState } from "react";
+import { Link, data, isRouteErrorResponse, useFetcher } from "react-router";
+import { toast } from "sonner";
 import type { Route } from "./+types/seats";
 import { getCurrentUserId } from "~/lib/session";
 import {
   createSeatsModule,
+  REFUND_REASON_MAX_LENGTH,
+  REFUND_REASON_MIN_LENGTH,
+  type RefundOffer,
   type SeatEnrollment,
   type SeatState,
 } from "~/lib/seats.server";
@@ -11,6 +15,7 @@ import { UnenrollmentInitiator } from "~/db/schema";
 import { formatPrice } from "~/lib/utils";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
+import { Textarea } from "~/components/ui/textarea";
 import { BookOpen, Copy, Check, AlertTriangle } from "lucide-react";
 
 // The Buyer's seats page: every Purchase with its Seats. Seat states and
@@ -129,6 +134,69 @@ function CopySeatCodeLink({ code }: { code: string }) {
   );
 }
 
+/** A Refund Request for one Seat, offered while Refund Eligibility allows it. */
+function RequestRefund({
+  seatId,
+  offer,
+}: {
+  seatId: number;
+  offer: RefundOffer;
+}) {
+  const fetcher = useFetcher<{ errors?: Record<string, string> }>();
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const isSubmitting = fetcher.state !== "idle";
+
+  useEffect(() => {
+    const firstError = Object.values(fetcher.data?.errors ?? {})[0];
+    if (fetcher.state === "idle" && firstError) toast.error(firstError);
+  }, [fetcher.state, fetcher.data]);
+
+  if (!isFormOpen) {
+    return (
+      <button
+        onClick={() => setIsFormOpen(true)}
+        className="inline-flex items-center rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted transition-colors"
+      >
+        Request a refund
+      </button>
+    );
+  }
+
+  return (
+    <fetcher.Form
+      method="post"
+      action={`/seats/${seatId}/refund`}
+      className="mt-2 max-w-xs space-y-2"
+    >
+      <p className="text-xs text-muted-foreground">
+        Refund Amount {formatPrice(offer.refundAmount)}. Possible until{" "}
+        {formatDate(`${offer.lastDayOfRefundWindow}T12:00:00`)}.
+      </p>
+      <Textarea
+        name="reason"
+        rows={2}
+        required
+        minLength={REFUND_REASON_MIN_LENGTH}
+        maxLength={REFUND_REASON_MAX_LENGTH}
+        placeholder="Your Refund Reason"
+      />
+      <div className="flex gap-2">
+        <Button type="submit" size="sm" disabled={isSubmitting}>
+          {isSubmitting ? "Sending..." : "Make the Refund Request"}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => setIsFormOpen(false)}
+        >
+          Keep the Seat
+        </Button>
+      </div>
+    </fetcher.Form>
+  );
+}
+
 export default function Seats({ loaderData }: Route.ComponentProps) {
   const { purchases } = loaderData;
 
@@ -243,6 +311,17 @@ export default function Seats({ loaderData }: Route.ComponentProps) {
                           <td className="px-4 py-3">
                             {seat.state === "open" && (
                               <CopySeatCodeLink code={seat.code} />
+                            )}
+                            {seat.refundOffer && (
+                              <RequestRefund
+                                seatId={seat.id}
+                                offer={seat.refundOffer}
+                              />
+                            )}
+                            {seat.refundPending && (
+                              <span className="text-xs text-muted-foreground">
+                                Refund Request Pending
+                              </span>
                             )}
                           </td>
                         </tr>

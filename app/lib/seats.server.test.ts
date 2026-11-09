@@ -66,6 +66,9 @@ describe("a Buyer's Purchases", () => {
         state: "open",
         holder: null,
         enrollments: [],
+        // Bought in October: the Refund Window has closed.
+        refundOffer: null,
+        refundPending: false,
       },
       {
         id: bought[1].id,
@@ -80,6 +83,8 @@ describe("a Buyer's Purchases", () => {
             initiator: null,
           },
         ],
+        refundOffer: null,
+        refundPending: false,
       },
       {
         id: bought[2].id,
@@ -87,6 +92,9 @@ describe("a Buyer's Purchases", () => {
         state: "open",
         holder: null,
         enrollments: [],
+        // Bought in October: the Refund Window has closed.
+        refundOffer: null,
+        refundPending: false,
       },
     ]);
   });
@@ -1144,5 +1152,613 @@ describe("Completion", () => {
     expect(seats.unenroll({ studentId: ana.id, courseId: course.id }).ok).toBe(
       true
     );
+  });
+});
+
+// ─── Refunds ───
+
+// Times in the server's time zone: the Refund Window counts calendar days
+// there, so these tests hold wherever they run.
+function local(day: number, hour = 12, minute = 0) {
+  return new Date(2026, 10, day, hour, minute);
+}
+
+function seatsAt(when: Date) {
+  return createSeatsModule({ db, clock: () => when });
+}
+
+const REASON = "It is not what I expected.";
+
+describe("Refund Eligibility", () => {
+  // Liam's Personal Purchase, bought late on 1 November.
+  function liamsPersonalPurchase(coursePrice = 7900) {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Course", coursePrice);
+    const { seats: bought } = scenario.purchase(liam, course, {
+      seatPrice: coursePrice,
+      at: local(1, 23).toISOString(),
+    });
+    const enrollment = scenario.enroll(
+      liam,
+      bought[0],
+      local(1, 23).toISOString()
+    );
+    return { liam, course, seat: bought[0], enrollment };
+  }
+
+  it("allows a Refund Request for a fresh Personal Purchase, offering the Seat Price", () => {
+    const { liam, course, seat } = liamsPersonalPurchase();
+
+    expect(
+      seatsAt(local(3)).refundEligibility({ buyerId: liam.id, seatId: seat.id })
+    ).toEqual({
+      eligible: true,
+      seatId: seat.id,
+      courseId: course.id,
+      refundAmount: 7900,
+      lastDayOfRefundWindow: "2026-11-15",
+    });
+  });
+
+  it("keeps the Refund Window open to the end of its last day, 14 days after the day of purchase", () => {
+    const { liam, seat } = liamsPersonalPurchase();
+
+    // Bought at 23:00 on the 1st, the Buyer still gets all of the 15th.
+    expect(
+      seatsAt(local(15, 23, 59)).refundEligibility({
+        buyerId: liam.id,
+        seatId: seat.id,
+      })
+    ).toMatchObject({ eligible: true });
+  });
+
+  it("closes the Refund Window on the day after its last day", () => {
+    const { liam, seat } = liamsPersonalPurchase();
+
+    expect(
+      seatsAt(local(16, 0, 0)).refundEligibility({
+        buyerId: liam.id,
+        seatId: seat.id,
+      })
+    ).toEqual({ eligible: false, refusal: "refund-window-closed" });
+  });
+
+  describe("the watch limit", () => {
+    // Liam watches two lessons, across two Enrollments on the same Seat.
+    function liamWatched(totalSeconds: number) {
+      const { liam, course, seat, enrollment } = liamsPersonalPurchase();
+      const [first, second] = scenario.lessons(course, 4);
+      scenario.watch(liam, first, 3600, local(2).toISOString());
+      scenario.unenroll(
+        enrollment,
+        UnenrollmentInitiator.Student,
+        local(3).toISOString()
+      );
+      scenario.enroll(liam, seat, local(4).toISOString());
+      scenario.watch(liam, second, totalSeconds - 3600, local(5).toISOString());
+      return { liam, seat };
+    }
+
+    it("refuses a Seat whose Seat Usage, summed over every Enrollment, reaches 2 hours", () => {
+      const { liam, seat } = liamWatched(2 * 3600);
+
+      expect(
+        seatsAt(local(6)).refundEligibility({
+          buyerId: liam.id,
+          seatId: seat.id,
+        })
+      ).toEqual({ eligible: false, refusal: "watch-limit-reached" });
+    });
+
+    it("allows a Seat watched for just under 2 hours", () => {
+      const { liam, seat } = liamWatched(2 * 3600 - 1);
+
+      expect(
+        seatsAt(local(6)).refundEligibility({
+          buyerId: liam.id,
+          seatId: seat.id,
+        })
+      ).toMatchObject({ eligible: true });
+    });
+
+    it("counts the furthest position reached in a lesson, not every heartbeat", () => {
+      const { liam, course, seat } = liamsPersonalPurchase();
+      const [lesson] = scenario.lessons(course, 1);
+      for (const position of [1800, 3600, 5400, 7000]) {
+        scenario.watch(liam, lesson, position, local(2).toISOString());
+      }
+
+      expect(
+        seatsAt(local(3)).refundEligibility({
+          buyerId: liam.id,
+          seatId: seat.id,
+        })
+      ).toMatchObject({ eligible: true });
+    });
+
+    it("does not count what was watched while not enrolled on the Seat", () => {
+      const { liam, course, seat, enrollment } = liamsPersonalPurchase();
+      const [lesson] = scenario.lessons(course, 1);
+      scenario.unenroll(
+        enrollment,
+        UnenrollmentInitiator.Student,
+        local(2).toISOString()
+      );
+      // Before the Purchase, and between Enrollments.
+      scenario.watch(liam, lesson, 3 * 3600, local(1, 8).toISOString());
+      scenario.watch(liam, lesson, 3 * 3600, local(3).toISOString());
+
+      expect(
+        seatsAt(local(4)).refundEligibility({
+          buyerId: liam.id,
+          seatId: seat.id,
+        })
+      ).toMatchObject({ eligible: true });
+    });
+  });
+
+  describe("the completion limit", () => {
+    function liamCompleted(lessonsCompleted: number) {
+      const { liam, course, seat } = liamsPersonalPurchase();
+      const lessons = scenario.lessons(course, 4);
+      for (const lesson of lessons.slice(0, lessonsCompleted)) {
+        scenario.completeLesson(liam, lesson, local(2).toISOString());
+      }
+      return { liam, seat };
+    }
+
+    it("refuses a Seat with half of the course's lessons completed", () => {
+      const { liam, seat } = liamCompleted(2);
+
+      expect(
+        seatsAt(local(3)).refundEligibility({
+          buyerId: liam.id,
+          seatId: seat.id,
+        })
+      ).toEqual({ eligible: false, refusal: "completion-limit-reached" });
+    });
+
+    it("allows a Seat with less than half completed", () => {
+      const { liam, seat } = liamCompleted(1);
+
+      expect(
+        seatsAt(local(3)).refundEligibility({
+          buyerId: liam.id,
+          seatId: seat.id,
+        })
+      ).toMatchObject({ eligible: true });
+    });
+  });
+
+  describe("the Refund Amount", () => {
+    it("is the discounted Seat Price when a PPP Discount was given", () => {
+      const priya = scenario.person("Priya");
+      const course = scenario.course("Course", 8000, { pppEnabled: true });
+      const bought = seatsAt(local(1)).personalPurchase({
+        buyerId: priya.id,
+        courseId: course.id,
+        country: "IN",
+      });
+      if (!bought.ok) throw new Error("Purchase refused");
+
+      expect(
+        seatsAt(local(2)).refundEligibility({
+          buyerId: priya.id,
+          seatId: bought.seatId,
+        })
+      ).toMatchObject({ eligible: true, refundAmount: 4000 });
+    });
+
+    it("is the full Seat Price when no PPP Discount was given", () => {
+      const emma = scenario.person("Emma");
+      const course = scenario.course("Course", 8000, { pppEnabled: true });
+      const bought = seatsAt(local(1)).personalPurchase({
+        buyerId: emma.id,
+        courseId: course.id,
+        country: "US",
+      });
+      if (!bought.ok) throw new Error("Purchase refused");
+
+      expect(
+        seatsAt(local(2)).refundEligibility({
+          buyerId: emma.id,
+          seatId: bought.seatId,
+        })
+      ).toMatchObject({ eligible: true, refundAmount: 8000 });
+    });
+
+    it("stays the Seat Price after the Course Price changes (#2)", () => {
+      const { liam, course, seat } = liamsPersonalPurchase(7900);
+      db.update(courses)
+        .set({ price: 12900 })
+        .where(eq(courses.id, course.id))
+        .run();
+
+      expect(
+        seatsAt(local(3)).refundEligibility({
+          buyerId: liam.id,
+          seatId: seat.id,
+        })
+      ).toMatchObject({ eligible: true, refundAmount: 7900 });
+    });
+  });
+
+  it("refuses a second Refund Request while one is Pending", () => {
+    const { liam, seat } = liamsPersonalPurchase();
+    scenario.requestRefund(seat, REASON, local(2).toISOString());
+
+    expect(
+      seatsAt(local(3)).refundEligibility({ buyerId: liam.id, seatId: seat.id })
+    ).toEqual({ eligible: false, refusal: "pending-refund-request" });
+  });
+
+  it("refuses a refunded Seat, so it is never refunded twice (#6)", () => {
+    const { liam, seat } = liamsPersonalPurchase();
+    const admin = scenario.person("Admin");
+    const request = scenario.requestRefund(seat, REASON, local(2).toISOString());
+    scenario.approveRefund(request, admin, 7900, local(3).toISOString());
+
+    expect(
+      seatsAt(local(4)).refundEligibility({ buyerId: liam.id, seatId: seat.id })
+    ).toEqual({ eligible: false, refusal: "refunded" });
+  });
+
+  it("allows a new Refund Request after a Refund Decline, which changes nothing else", () => {
+    const { liam, seat } = liamsPersonalPurchase();
+    const admin = scenario.person("Admin");
+    const request = scenario.requestRefund(seat, REASON, local(2).toISOString());
+    scenario.declineRefund(request, admin, local(3).toISOString());
+
+    expect(
+      seatsAt(local(4)).refundEligibility({ buyerId: liam.id, seatId: seat.id })
+    ).toMatchObject({ eligible: true });
+  });
+
+  describe("a Purchase of several Seats", () => {
+    function bossyBought3Seats() {
+      const bossy = scenario.person("Bossy");
+      const ana = scenario.person("Ana");
+      const course = scenario.course("Course", 7900);
+      const { seats: bought } = scenario.purchase(bossy, course, {
+        seatCount: 3,
+        seatPrice: 5999,
+        at: local(1).toISOString(),
+      });
+      return { bossy, ana, course, bought };
+    }
+
+    it("offers the Seat Price of one Seat, not the Amount Paid (#3)", () => {
+      const { bossy, bought } = bossyBought3Seats();
+
+      expect(
+        seatsAt(local(2)).refundEligibility({
+          buyerId: bossy.id,
+          seatId: bought[0].id,
+        })
+      ).toMatchObject({ eligible: true, refundAmount: 5999 });
+    });
+
+    it("refuses a Seat taken by another Student, but not the other Seats of the Purchase", () => {
+      const { bossy, ana, bought } = bossyBought3Seats();
+      scenario.enroll(ana, bought[0], local(2).toISOString());
+      const now = seatsAt(local(3));
+
+      expect(
+        now.refundEligibility({ buyerId: bossy.id, seatId: bought[0].id })
+      ).toEqual({ eligible: false, refusal: "taken-by-another-student" });
+      expect(
+        now.refundEligibility({ buyerId: bossy.id, seatId: bought[1].id })
+      ).toMatchObject({ eligible: true });
+    });
+
+    it("refuses a Seat another Student has used, even after they unenrolled", () => {
+      const { bossy, ana, bought } = bossyBought3Seats();
+      const enrollment = scenario.enroll(ana, bought[0], local(2).toISOString());
+      scenario.unenroll(
+        enrollment,
+        UnenrollmentInitiator.Student,
+        local(3).toISOString()
+      );
+
+      expect(
+        seatsAt(local(4)).refundEligibility({
+          buyerId: bossy.id,
+          seatId: bought[0].id,
+        })
+      ).toEqual({ eligible: false, refusal: "taken-by-another-student" });
+    });
+
+    it("allows the Buyer's own Seat while they are enrolled on it", () => {
+      const { bossy, bought } = bossyBought3Seats();
+      scenario.enroll(bossy, bought[2], local(2).toISOString());
+
+      expect(
+        seatsAt(local(3)).refundEligibility({
+          buyerId: bossy.id,
+          seatId: bought[2].id,
+        })
+      ).toMatchObject({ eligible: true });
+    });
+  });
+
+  it("refuses anyone but the Seat's Buyer", () => {
+    const { seat } = liamsPersonalPurchase();
+    const ana = scenario.person("Ana");
+
+    expect(
+      seatsAt(local(2)).refundEligibility({ buyerId: ana.id, seatId: seat.id })
+    ).toEqual({ eligible: false, refusal: "not-buyer" });
+  });
+
+  it("refuses an unknown Seat", () => {
+    const liam = scenario.person("Liam");
+
+    expect(
+      seatsAt(local(2)).refundEligibility({ buyerId: liam.id, seatId: 999 })
+    ).toEqual({ eligible: false, refusal: "unknown-seat" });
+  });
+});
+
+describe("making a Refund Request", () => {
+  function liamsPersonalPurchase() {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Course", 7900);
+    const bought = seatsAt(local(1)).personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: "US",
+    });
+    if (!bought.ok) throw new Error("Purchase refused");
+    return { liam, course, seatId: bought.seatId };
+  }
+
+  it("records a Pending Refund Request with its Refund Reason; the Buyer keeps access", () => {
+    const { liam, course, seatId } = liamsPersonalPurchase();
+
+    const result = seatsAt(local(2)).requestRefund({
+      buyerId: liam.id,
+      seatId,
+      reason: REASON,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      seatId,
+      courseId: course.id,
+      refundAmount: 7900,
+    });
+    expect(seats.seatHistory(seatId)?.events.at(-1)).toMatchObject({
+      type: "refund-requested",
+      at: local(2).toISOString(),
+      reason: REASON,
+    });
+    // Nothing changes before a decision.
+    expect(seats.activeEnrollment(liam.id, course.id)).toBeDefined();
+    expect(seats.buyerPurchases(liam.id)[0].seats[0].state).toBe("taken");
+  });
+
+  it("re-checks Refund Eligibility: a second request while one is Pending is refused", () => {
+    const { liam, seatId } = liamsPersonalPurchase();
+    const now = seatsAt(local(2));
+    now.requestRefund({ buyerId: liam.id, seatId, reason: REASON });
+
+    expect(
+      now.requestRefund({ buyerId: liam.id, seatId, reason: REASON })
+    ).toEqual({ ok: false, refusal: "pending-refund-request" });
+  });
+
+  it("re-checks Refund Eligibility: refused once the Refund Window has closed", () => {
+    const { liam, seatId } = liamsPersonalPurchase();
+
+    expect(
+      seatsAt(local(16)).requestRefund({
+        buyerId: liam.id,
+        seatId,
+        reason: REASON,
+      })
+    ).toEqual({ ok: false, refusal: "refund-window-closed" });
+  });
+
+  it("asks for a Refund Reason of 10 to 1000 characters", () => {
+    const { liam, seatId } = liamsPersonalPurchase();
+    const now = seatsAt(local(2));
+    const request = (reason: string) =>
+      now.requestRefund({ buyerId: liam.id, seatId, reason });
+
+    expect(request("Too short")).toEqual({
+      ok: false,
+      refusal: "refund-reason-length",
+    });
+    expect(request("x".repeat(1001))).toEqual({
+      ok: false,
+      refusal: "refund-reason-length",
+    });
+    expect(request("x".repeat(1000))).toMatchObject({ ok: true });
+  });
+
+  it("shows up among the Buyer's Pending Refund Requests, with its Refund Amount", () => {
+    const { liam, course, seatId } = liamsPersonalPurchase();
+    const ana = scenario.person("Ana");
+    seatsAt(local(2)).requestRefund({ buyerId: liam.id, seatId, reason: REASON });
+
+    expect(seats.pendingRefundRequests(liam.id)).toEqual([
+      {
+        id: expect.any(Number),
+        seatId,
+        courseTitle: course.title,
+        courseSlug: course.slug,
+        refundAmount: 7900,
+        reason: REASON,
+        requestedAt: local(2).toISOString(),
+      },
+    ]);
+    expect(seats.pendingRefundRequests(ana.id)).toEqual([]);
+  });
+
+  it("leaves decided Refund Requests out of the Pending ones", () => {
+    const { liam, seatId } = liamsPersonalPurchase();
+    const admin = scenario.person("Admin");
+    const result = seatsAt(local(2)).requestRefund({
+      buyerId: liam.id,
+      seatId,
+      reason: REASON,
+    });
+    if (!result.ok) throw new Error("Refund Request refused");
+    scenario.declineRefund(
+      { id: result.refundRequestId },
+      admin,
+      local(3).toISOString()
+    );
+
+    expect(seats.pendingRefundRequests(liam.id)).toEqual([]);
+  });
+});
+
+describe("the Cancellation", () => {
+  it("is offered to a Student on the Seat of their own Personal Purchase, with its Refund Amount", () => {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Course", 7900);
+    const bought = seatsAt(local(1)).personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: "US",
+    });
+    if (!bought.ok) throw new Error("Purchase refused");
+
+    expect(
+      seatsAt(local(2)).cancellation({ studentId: liam.id, courseId: course.id })
+    ).toEqual({
+      eligible: true,
+      seatId: bought.seatId,
+      courseId: course.id,
+      refundAmount: 7900,
+      lastDayOfRefundWindow: "2026-11-15",
+    });
+  });
+
+  it("checks the Seat the Student is enrolled on, not a later Purchase of Seats (#1)", () => {
+    const liam = scenario.person("Liam");
+    const ana = scenario.person("Ana");
+    const course = scenario.course("Course", 7900);
+    const bought = seatsAt(local(1)).personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: "US",
+    });
+    if (!bought.ok) throw new Error("Purchase refused");
+    const later = seatsAt(local(2)).buySeats({
+      buyerId: liam.id,
+      courseId: course.id,
+      seatCount: 2,
+      country: "US",
+    });
+    seatsAt(local(3)).enrollWithSeatCode({
+      studentId: ana.id,
+      seatCode: later.seats[0].code,
+      country: "US",
+    });
+
+    expect(
+      seatsAt(local(4)).cancellation({ studentId: liam.id, courseId: course.id })
+    ).toMatchObject({ eligible: true, seatId: bought.seatId });
+  });
+
+  it("is not offered to a Student enrolled with someone else's Seat Code", () => {
+    const bossy = scenario.person("Bossy");
+    const ana = scenario.person("Ana");
+    const course = scenario.course("Course");
+    const made = seatsAt(local(1)).buySeats({
+      buyerId: bossy.id,
+      courseId: course.id,
+      seatCount: 1,
+      country: "US",
+    });
+    seatsAt(local(1)).enrollWithSeatCode({
+      studentId: ana.id,
+      seatCode: made.seats[0].code,
+      country: "US",
+    });
+
+    expect(
+      seatsAt(local(2)).cancellation({ studentId: ana.id, courseId: course.id })
+    ).toBeNull();
+  });
+
+  it("is not offered to a Buyer enrolled on a Seat of a Purchase of several Seats", () => {
+    const bossy = scenario.person("Bossy");
+    const course = scenario.course("Course");
+    const made = seatsAt(local(1)).buySeats({
+      buyerId: bossy.id,
+      courseId: course.id,
+      seatCount: 3,
+      country: "US",
+    });
+    seatsAt(local(1)).enrollWithSeatCode({
+      studentId: bossy.id,
+      seatCode: made.seats[0].code,
+      country: "US",
+    });
+
+    // Those Seats are refunded one by one from the seats page.
+    expect(
+      seatsAt(local(2)).cancellation({ studentId: bossy.id, courseId: course.id })
+    ).toBeNull();
+  });
+
+  it("is not offered while a Refund Request is Pending", () => {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Course");
+    const bought = seatsAt(local(1)).personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: "US",
+    });
+    if (!bought.ok) throw new Error("Purchase refused");
+    const now = seatsAt(local(2));
+    now.requestRefund({ buyerId: liam.id, seatId: bought.seatId, reason: REASON });
+
+    expect(
+      now.cancellation({ studentId: liam.id, courseId: course.id })
+    ).toBeNull();
+  });
+
+  it("is not offered to someone not enrolled", () => {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Course");
+
+    expect(
+      seats.cancellation({ studentId: liam.id, courseId: course.id })
+    ).toBeNull();
+  });
+});
+
+describe("Refund Requests on the seats page", () => {
+  it("offers a Refund Request for each eligible Seat, with its Refund Amount", () => {
+    const bossy = scenario.person("Bossy");
+    const ana = scenario.person("Ana");
+    const course = scenario.course("Course", 7900);
+    const { seats: bought } = scenario.purchase(bossy, course, {
+      seatCount: 3,
+      seatPrice: 5999,
+      at: local(1).toISOString(),
+    });
+    scenario.enroll(ana, bought[0], local(2).toISOString());
+    scenario.requestRefund(bought[1], REASON, local(2).toISOString());
+
+    const [purchase] = seatsAt(local(3)).buyerPurchases(bossy.id);
+
+    expect(
+      purchase.seats.map((s) => ({
+        refundOffer: s.refundOffer,
+        refundPending: s.refundPending,
+      }))
+    ).toEqual([
+      { refundOffer: null, refundPending: false },
+      { refundOffer: null, refundPending: true },
+      {
+        refundOffer: { refundAmount: 5999, lastDayOfRefundWindow: "2026-11-15" },
+        refundPending: false,
+      },
+    ]);
   });
 });

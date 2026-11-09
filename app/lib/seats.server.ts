@@ -1,17 +1,34 @@
 import crypto from "crypto";
-import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import {
+  and,
+  asc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  lte,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db as appDb } from "~/db";
 import * as schema from "~/db/schema";
 import {
   courses,
   enrollments,
+  lessonProgress,
+  LessonProgressStatus,
+  lessons,
+  modules,
   purchases,
   refundRequests,
   RefundRequestStatus,
   seats,
   UnenrollmentInitiator,
   users,
+  videoWatchEvents,
 } from "~/db/schema";
 import { calculatePppPrice } from "~/lib/ppp";
 
@@ -79,6 +96,10 @@ export type BuyerSeat = {
   holder: Holder | null;
   // Every Enrollment on the Seat, oldest first.
   enrollments: SeatEnrollment[];
+  // What a Refund Request for the Seat would offer now, or null when Refund
+  // Eligibility refuses one.
+  refundOffer: RefundOffer | null;
+  refundPending: boolean;
 };
 
 export type BuyerPurchase = {
@@ -154,6 +175,60 @@ export type UnenrollmentRefusal = { refusal: "not-enrolled" };
 export type MadePurchase = {
   purchaseId: number;
   seats: { id: number; code: string }[];
+};
+
+// ─── Refund rules (docs/current-rules.md) ───
+
+/** The Refund Window: calendar days after the day of purchase, inclusive. */
+export const REFUND_WINDOW_DAYS = 14;
+/** Usage Limits: a Seat watched this long, or completed this far, is not refundable. */
+export const WATCH_LIMIT_SECONDS = 2 * 60 * 60;
+export const COMPLETION_LIMIT = 0.5;
+/** The length of a Refund Reason, in characters. */
+export const REFUND_REASON_MIN_LENGTH = 10;
+export const REFUND_REASON_MAX_LENGTH = 1000;
+
+/** What a Refund Request for a Seat offers, while Refund Eligibility allows one. */
+export type RefundOffer = {
+  refundAmount: number;
+  // The last calendar day of the Refund Window, as YYYY-MM-DD.
+  lastDayOfRefundWindow: string;
+};
+
+export type RefundRefusal =
+  | { refusal: "unknown-seat" }
+  | { refusal: "not-buyer" }
+  | { refusal: "refunded" }
+  | { refusal: "pending-refund-request" }
+  | { refusal: "taken-by-another-student" }
+  | { refusal: "refund-window-closed" }
+  | { refusal: "watch-limit-reached" }
+  | { refusal: "completion-limit-reached" };
+
+export type RefundEligibility =
+  | ({ eligible: true; seatId: number; courseId: number } & RefundOffer)
+  | ({ eligible: false } & RefundRefusal);
+
+export type RefundRequested = {
+  ok: true;
+  refundRequestId: number;
+  seatId: number;
+  courseId: number;
+  refundAmount: number;
+};
+
+export type RefundRequestRefusal =
+  | RefundRefusal
+  | { refusal: "refund-reason-length" };
+
+export type PendingRefundRequest = {
+  id: number;
+  seatId: number;
+  courseTitle: string;
+  courseSlug: string;
+  refundAmount: number;
+  reason: string;
+  requestedAt: string;
 };
 
 export function createSeatsModule(
@@ -441,6 +516,112 @@ export function createSeatsModule(
       .run();
   }
 
+  /**
+   * Seat Usage: what was watched and completed while enrolled on the Seat,
+   * summed over every Enrollment in its Seat History.
+   */
+  function seatUsage(history: SeatHistory): SeatUsage {
+    const none = { watchedSeconds: 0, completion: 0 };
+    const periods = seatEnrollments(history);
+    if (periods.length === 0) return none;
+    const lessonIds = db
+      .select({ id: lessons.id })
+      .from(lessons)
+      .innerJoin(modules, eq(lessons.moduleId, modules.id))
+      .where(eq(modules.courseId, history.courseId))
+      .all()
+      .map((l) => l.id);
+    if (lessonIds.length === 0) return none;
+
+    // Whether a row of `userId` at time `at` falls inside an Enrollment.
+    const whileEnrolled = (
+      userId: SQLiteColumn,
+      at: SQLiteColumn
+    ): SQL | undefined =>
+      or(
+        ...periods.map((p) =>
+          and(
+            eq(userId, p.studentId),
+            gte(at, p.enrolledAt),
+            p.endedAt === null ? undefined : lte(at, p.endedAt)
+          )
+        )
+      );
+
+    // Watched time is the furthest position reached in each lesson.
+    const furthest = db
+      .select({
+        furthest: sql<number>`max(${videoWatchEvents.positionSeconds})`,
+      })
+      .from(videoWatchEvents)
+      .where(
+        and(
+          inArray(videoWatchEvents.lessonId, lessonIds),
+          whileEnrolled(videoWatchEvents.userId, videoWatchEvents.createdAt)
+        )
+      )
+      .groupBy(videoWatchEvents.userId, videoWatchEvents.lessonId)
+      .all();
+
+    const completed = db
+      .select({
+        count: sql<number>`count(distinct ${lessonProgress.lessonId})`,
+      })
+      .from(lessonProgress)
+      .where(
+        and(
+          inArray(lessonProgress.lessonId, lessonIds),
+          eq(lessonProgress.status, LessonProgressStatus.Completed),
+          or(
+            whileEnrolled(lessonProgress.userId, lessonProgress.completedAt),
+            // A completed lesson with no time cannot be placed outside the
+            // Enrollments, so it counts.
+            and(
+              inArray(
+                lessonProgress.userId,
+                periods.map((p) => p.studentId)
+              ),
+              isNull(lessonProgress.completedAt)
+            )
+          )
+        )
+      )
+      .get();
+
+    return {
+      watchedSeconds: furthest.reduce((sum, row) => sum + row.furthest, 0),
+      completion: (completed?.count ?? 0) / lessonIds.length,
+    };
+  }
+
+  function refundEligibilityOf(
+    history: SeatHistory,
+    buyerId: number
+  ): RefundEligibility {
+    const refusal = decideRefundEligibility(history, {
+      buyerId,
+      now: clock(),
+      usage: () => seatUsage(history),
+    });
+    return refusal
+      ? { eligible: false, ...refusal }
+      : {
+          eligible: true,
+          seatId: history.seatId,
+          courseId: history.courseId,
+          ...refundOffer(history),
+        };
+  }
+
+  function refundEligibility(input: {
+    buyerId: number;
+    seatId: number;
+  }): RefundEligibility {
+    const history = seatHistories([input.seatId])[0];
+    if (!history) return { eligible: false, refusal: "unknown-seat" };
+    return refundEligibilityOf(history, input.buyerId);
+  }
+
   return {
     clock,
 
@@ -540,6 +721,43 @@ export function createSeatsModule(
       });
     },
 
+    /**
+     * The Buyer makes a Refund Request for one Seat, with a Refund Reason.
+     * It is Pending until decided; nothing else changes until then.
+     */
+    requestRefund(input: {
+      buyerId: number;
+      seatId: number;
+      reason: string;
+    }): RefundRequested | ({ ok: false } & RefundRequestRefusal) {
+      const reason = input.reason.trim();
+      if (
+        reason.length < REFUND_REASON_MIN_LENGTH ||
+        reason.length > REFUND_REASON_MAX_LENGTH
+      ) {
+        return { ok: false, refusal: "refund-reason-length" };
+      }
+      return db.transaction((tx) => {
+        const eligibility = refundEligibility(input);
+        if (!eligibility.eligible) {
+          const { eligible: _, ...refusal } = eligibility;
+          return { ok: false, ...refusal };
+        }
+        const request = tx
+          .insert(refundRequests)
+          .values({ seatId: input.seatId, reason, requestedAt: now() })
+          .returning({ id: refundRequests.id })
+          .get();
+        return {
+          ok: true,
+          refundRequestId: request.id,
+          seatId: eligibility.seatId,
+          courseId: eligibility.courseId,
+          refundAmount: eligibility.refundAmount,
+        } as const;
+      });
+    },
+
     // ─── Questions ───
 
     /** The Seat Price and PPP Country Restriction a Purchase would get now. */
@@ -616,8 +834,67 @@ export function createSeatsModule(
               student: person(studentId),
               ...e,
             })),
+            refundOffer: offerOf(refundEligibilityOf(h, buyerId)),
+            refundPending: pendingRefundRequestId(h) !== null,
           })),
       }));
+    },
+
+    /** Whether the Buyer may make a Refund Request for a Seat now, and for how much. */
+    refundEligibility,
+
+    /**
+     * The Cancellation a Student is offered: Refund Eligibility of the Seat
+     * they are enrolled on, when that Seat is their own Personal Purchase.
+     * Null when there is none to offer.
+     */
+    cancellation(input: {
+      studentId: number;
+      courseId: number;
+    }): Extract<RefundEligibility, { eligible: true }> | null {
+      const seatId = activeEnrollment(input.studentId, input.courseId)?.seatId;
+      if (seatId == null) return null;
+      const purchase = db
+        .select({ buyerId: purchases.userId, seatCount: purchases.seatCount })
+        .from(seats)
+        .innerJoin(purchases, eq(seats.purchaseId, purchases.id))
+        .where(eq(seats.id, seatId))
+        .get();
+      const isPersonalPurchase =
+        purchase?.buyerId === input.studentId && purchase.seatCount === 1;
+      if (!isPersonalPurchase) return null;
+      const eligibility = refundEligibility({
+        buyerId: input.studentId,
+        seatId,
+      });
+      return eligibility.eligible ? eligibility : null;
+    },
+
+    /** A Buyer's Pending Refund Requests, oldest first, with their Refund Amount. */
+    pendingRefundRequests(buyerId: number): PendingRefundRequest[] {
+      return db
+        .select({
+          id: refundRequests.id,
+          seatId: refundRequests.seatId,
+          courseTitle: courses.title,
+          courseSlug: courses.slug,
+          // The Refund Amount is the Seat Price.
+          refundAmount: purchases.seatPrice,
+          reason: refundRequests.reason,
+          requestedAt: refundRequests.requestedAt,
+        })
+        .from(refundRequests)
+        .innerJoin(seats, eq(refundRequests.seatId, seats.id))
+        .innerJoin(purchases, eq(seats.purchaseId, purchases.id))
+        .innerJoin(courses, eq(purchases.courseId, courses.id))
+        .where(
+          and(
+            eq(purchases.userId, buyerId),
+            eq(refundRequests.status, RefundRequestStatus.Pending)
+          )
+        )
+        .orderBy(asc(refundRequests.requestedAt), asc(refundRequests.id))
+        .all();
     },
 
     /** Whether a person has made at least one Purchase. */
@@ -687,6 +964,92 @@ export function seatState(history: SeatHistory): SeatState {
     return "refunded";
   }
   return seatHolderId(history) === null ? "open" : "taken";
+}
+
+/** The Pending Refund Request for the Seat, if any. */
+export function pendingRefundRequestId(history: SeatHistory): number | null {
+  const decided = new Set(
+    history.events.flatMap((e) =>
+      e.type === "refund-approved" || e.type === "refund-declined"
+        ? [e.refundRequestId]
+        : []
+    )
+  );
+  const pending = history.events.find(
+    (e) => e.type === "refund-requested" && !decided.has(e.refundRequestId)
+  );
+  return pending?.type === "refund-requested" ? pending.refundRequestId : null;
+}
+
+/** Watched time and completion used on a Seat. */
+export type SeatUsage = {
+  // The furthest video position reached in each lesson, summed.
+  watchedSeconds: number;
+  // The share of the course's lessons completed, from 0 to 1.
+  completion: number;
+};
+
+/**
+ * Refund Eligibility: why the Buyer may not make a Refund Request for a Seat
+ * now, or null when they may. Seat Usage is asked for only when every other
+ * rule passes.
+ */
+export function decideRefundEligibility(
+  history: SeatHistory,
+  input: { buyerId: number; now: Date; usage: () => SeatUsage }
+): RefundRefusal | null {
+  if (history.buyerId !== input.buyerId) return { refusal: "not-buyer" };
+  if (seatState(history) === "refunded") return { refusal: "refunded" };
+  if (pendingRefundRequestId(history) !== null) {
+    return { refusal: "pending-refund-request" };
+  }
+  const takenByAnother = history.events.some(
+    (e) => e.type === "enrolled" && e.studentId !== history.buyerId
+  );
+  if (takenByAnother) return { refusal: "taken-by-another-student" };
+
+  if (calendarDay(input.now) > lastDayOfRefundWindow(history)) {
+    return { refusal: "refund-window-closed" };
+  }
+
+  const usage = input.usage();
+  if (usage.watchedSeconds >= WATCH_LIMIT_SECONDS) {
+    return { refusal: "watch-limit-reached" };
+  }
+  if (usage.completion >= COMPLETION_LIMIT) {
+    return { refusal: "completion-limit-reached" };
+  }
+  return null;
+}
+
+/** The Refund Amount (the Seat Price) and the Refund Window's last day. */
+export function refundOffer(history: SeatHistory): RefundOffer {
+  return {
+    refundAmount: history.seatPrice,
+    lastDayOfRefundWindow: lastDayOfRefundWindow(history),
+  };
+}
+
+function offerOf(eligibility: RefundEligibility): RefundOffer | null {
+  if (!eligibility.eligible) return null;
+  const { refundAmount, lastDayOfRefundWindow } = eligibility;
+  return { refundAmount, lastDayOfRefundWindow };
+}
+
+// The Refund Window counts whole calendar days in the server's time zone:
+// someone who buys at 23:00 still gets all of their fourteenth day after.
+function lastDayOfRefundWindow(history: SeatHistory): string {
+  const purchased = history.events.find((e) => e.type === "purchased");
+  if (!purchased) throw new Error(`Seat ${history.seatId} has no purchase`);
+  const lastDay = new Date(purchased.at);
+  lastDay.setDate(lastDay.getDate() + REFUND_WINDOW_DAYS);
+  return calendarDay(lastDay);
+}
+
+function calendarDay(when: Date): string {
+  const month = String(when.getMonth() + 1).padStart(2, "0");
+  const day = String(when.getDate()).padStart(2, "0");
+  return `${when.getFullYear()}-${month}-${day}`;
 }
 
 /**
