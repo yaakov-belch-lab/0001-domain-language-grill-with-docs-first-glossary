@@ -1,5 +1,12 @@
 FROM node:22-bookworm
 
+# Trust the NetFree roots so HTTPS works behind this network's TLS-inspecting
+# filter. Must come before any download below. Delete with ca-certs/ if the
+# image is ever built on a network without NetFree.
+COPY ca-certs/ /usr/local/share/ca-certificates/
+RUN update-ca-certificates
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
   git \
@@ -30,6 +37,9 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 
 # Add Claude to PATH
 ENV PATH="/home/agent/.local/bin:$PATH"
+
+# "curl | bash" hides download failures, so fail the build if a tool is missing.
+RUN claude --version && gh --version
 
 WORKDIR /home/agent
 

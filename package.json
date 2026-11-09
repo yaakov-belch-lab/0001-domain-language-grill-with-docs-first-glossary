@@ -18,7 +18,8 @@
     "db:generate": "drizzle-kit generate",
     "db:seed": "tsx scripts/seed.ts",
     "db:migrate": "drizzle-kit migrate",
-    "loc": "git ls-files | grep -vE '(lock|.db|_snapshot.json)' | xargs wc -l"
+    "loc": "git ls-files | grep -vE '(lock|.db|_snapshot.json)' | xargs wc -l",
+    "sandcastle": "npx tsx .sandcastle/main.mts"
   },
   "dependencies": {
     "@hello-pangea/dnd": "^18.0.1",
