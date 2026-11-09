@@ -101,8 +101,9 @@ export async function loader({ params, request }: Route.LoaderArgs) {
       ? { id: course.id, title: course.title, slug: course.slug }
       : null,
     pppCountryRestriction: eligibility.seat?.pppCountryRestriction ?? null,
-    refusal: eligibility.eligible ? null : eligibility.refusal,
-    message: eligibility.eligible ? null : refusalMessage(eligibility),
+    refusal: eligibility.eligible
+      ? null
+      : { reason: eligibility.refusal, ...refusalMessage(eligibility) },
   };
 }
 
@@ -140,13 +141,12 @@ export default function SeatCode({
   loaderData,
   actionData,
 }: Route.ComponentProps) {
-  const { course, code, pppCountryRestriction, refusal, message } = loaderData;
-  const fetcher = useFetcher();
+  const { course, code, pppCountryRestriction, refusal } = loaderData;
+  const fetcher = useFetcher<typeof action>();
   const isSubmitting = fetcher.state !== "idle";
 
   useEffect(() => {
-    const error =
-      fetcher.data?.error ?? (actionData as { error?: string })?.error;
+    const error = fetcher.data?.error ?? actionData?.error;
     if (error) {
       toast.error(error);
     }
@@ -173,41 +173,8 @@ export default function SeatCode({
             <code className="rounded bg-muted px-2 py-0.5">{code}</code>
           </p>
 
-          {message && refusal === "already-enrolled" && course ? (
-            <div className="rounded-lg bg-green-50 p-4 dark:bg-green-900/20">
-              <div className="flex items-center justify-center gap-2 text-green-700 dark:text-green-400">
-                <CheckCircle2 className="size-5" />
-                <span className="font-medium">{message.title}</span>
-              </div>
-              <p className="mt-2 text-sm text-muted-foreground">
-                {message.detail}
-              </p>
-              <Link to={`/courses/${course.slug}`}>
-                <Button className="mt-4" size="lg">
-                  Go to Course
-                </Button>
-              </Link>
-            </div>
-          ) : message && refusal === "country-mismatch" ? (
-            <div className="rounded-lg bg-amber-50 p-4 dark:bg-amber-900/20">
-              <div className="flex items-center justify-center gap-2 text-amber-700 dark:text-amber-400">
-                <Globe className="size-5" />
-                <span className="font-medium">{message.title}</span>
-              </div>
-              <p className="mt-2 text-sm text-muted-foreground">
-                {message.detail}
-              </p>
-            </div>
-          ) : message ? (
-            <div className="rounded-lg bg-destructive/10 p-4">
-              <div className="flex items-center justify-center gap-2 text-destructive">
-                <AlertCircle className="size-5" />
-                <span className="font-medium">{message.title}</span>
-              </div>
-              <p className="mt-2 text-sm text-muted-foreground">
-                {message.detail}
-              </p>
-            </div>
+          {refusal ? (
+            <RefusalNotice refusal={refusal} course={course} />
           ) : (
             <>
               {pppCountryRestriction && (
@@ -241,6 +208,60 @@ export default function SeatCode({
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+type RefusalNoticeProps = {
+  refusal: {
+    reason: EnrollmentRefusal["refusal"];
+    title: string;
+    detail: string;
+  };
+  course: { slug: string } | null;
+};
+
+function RefusalNotice({ refusal, course }: RefusalNoticeProps) {
+  const detail = (
+    <p className="mt-2 text-sm text-muted-foreground">{refusal.detail}</p>
+  );
+
+  if (refusal.reason === "already-enrolled" && course) {
+    return (
+      <div className="rounded-lg bg-green-50 p-4 dark:bg-green-900/20">
+        <div className="flex items-center justify-center gap-2 text-green-700 dark:text-green-400">
+          <CheckCircle2 className="size-5" />
+          <span className="font-medium">{refusal.title}</span>
+        </div>
+        {detail}
+        <Link to={`/courses/${course.slug}`}>
+          <Button className="mt-4" size="lg">
+            Go to Course
+          </Button>
+        </Link>
+      </div>
+    );
+  }
+
+  if (refusal.reason === "country-mismatch") {
+    return (
+      <div className="rounded-lg bg-amber-50 p-4 dark:bg-amber-900/20">
+        <div className="flex items-center justify-center gap-2 text-amber-700 dark:text-amber-400">
+          <Globe className="size-5" />
+          <span className="font-medium">{refusal.title}</span>
+        </div>
+        {detail}
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg bg-destructive/10 p-4">
+      <div className="flex items-center justify-center gap-2 text-destructive">
+        <AlertCircle className="size-5" />
+        <span className="font-medium">{refusal.title}</span>
+      </div>
+      {detail}
     </div>
   );
 }
