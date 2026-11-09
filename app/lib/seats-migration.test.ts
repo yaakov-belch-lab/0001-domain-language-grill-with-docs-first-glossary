@@ -212,4 +212,14 @@ describe("filling the Seat model from today's data", () => {
       seatId: null,
     });
   });
+
+  it("drops the old teams, team members, coupons and refunds tables", () => {
+    const tables = db.$client
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('teams', 'team_members', 'coupons', 'refunds')"
+      )
+      .all();
+
+    expect(tables).toEqual([]);
+  });
 });
