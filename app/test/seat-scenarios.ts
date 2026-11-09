@@ -43,7 +43,7 @@ export function seatScenario(db: TestDb) {
     course(
       title: string,
       coursePrice = 7900,
-      options: { pppEnabled?: boolean } = {}
+      options: { pppEnabled?: boolean; owner?: { id: number } } = {}
     ) {
       return db
         .insert(schema.courses)
@@ -52,7 +52,7 @@ export function seatScenario(db: TestDb) {
           slug: title.toLowerCase().replace(/\W+/g, "-"),
           description: title,
           salesCopy: `## ${title}`,
-          instructorId: instructor.id,
+          instructorId: (options.owner ?? instructor).id,
           categoryId: category.id,
           status: schema.CourseStatus.Published,
           price: coursePrice,
