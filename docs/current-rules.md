@@ -29,7 +29,7 @@ Terms are defined in [GLOSSARY.md](../GLOSSARY.md). The model is in [ADR 0001](a
 
 ## Bugs: code that contradicts the model
 
-Bugs 1–10 are GitHub issues #1–#10. Bug 11 belongs to the migration to the model in ADR 0001. Spec #11 fixed every bug here except #9.
+Bugs 1–10 are GitHub issues #1–#10. Bug 11 belongs to the migration to the model in ADR 0001. Spec #11 fixed every bug here except #9. #21 verified bugs 2, 3, 4, 6, 7, 8 and 10 on `main`: each has a seats-module test naming it, except #10, which was checked by hand. Every screen and the Refund Request email were compared with the glossary.
 
 1. (#1, fixed in #17) Refund Requests are made per Purchase, not per Seat. The "latest Purchase" of the course is the one checked, so a later Purchase of Seats can block or take the Refund Request of an earlier Personal Purchase.
 2. (#2, fixed in #17) The Refund Amount uses the current Course Price instead of the Seat Price.

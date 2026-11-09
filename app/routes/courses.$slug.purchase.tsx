@@ -345,7 +345,7 @@ export default function PurchaseConfirmation({
             {isDiscounted && countryName && (
               <div className="mb-4 rounded-lg bg-green-50 p-3 dark:bg-green-900/20">
                 <p className="text-sm text-green-800 dark:text-green-300">
-                  PPP discount applied for {countryName} — {tierInfo.label}
+                  PPP Discount applied for {countryName} — {tierInfo.label}
                 </p>
               </div>
             )}
