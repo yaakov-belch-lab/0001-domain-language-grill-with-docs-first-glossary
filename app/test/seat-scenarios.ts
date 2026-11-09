@@ -138,6 +138,17 @@ export function seatScenario(db: TestDb) {
         .run();
     },
 
+    /**
+     * The Student's Completion of the course. Recording Completion is not in
+     * the app yet (#9), so tests set it directly.
+     */
+    complete(enrollment: { id: number }, at: string) {
+      db.update(schema.enrollments)
+        .set({ completedAt: at })
+        .where(eq(schema.enrollments.id, enrollment.id))
+        .run();
+    },
+
     /** A Buyer makes a Refund Request for a Seat. */
     requestRefund(seat: { id: number }, reason: string, at: string) {
       return db

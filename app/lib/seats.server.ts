@@ -67,11 +67,18 @@ export type SeatHistory = {
 
 export type Holder = { id: number; name: string };
 
+/** One Enrollment on a Seat, as its Buyer sees it in the Seat History. */
+export type SeatEnrollment = Omit<EnrollmentOnSeat, "studentId"> & {
+  student: Holder;
+};
+
 export type BuyerSeat = {
   id: number;
   code: string;
   state: SeatState;
   holder: Holder | null;
+  // Every Enrollment on the Seat, oldest first.
+  enrollments: SeatEnrollment[];
 };
 
 export type BuyerPurchase = {
@@ -134,6 +141,15 @@ export type Enrolled = {
   seatId: number;
   courseId: number;
 };
+
+export type Unenrolled = {
+  ok: true;
+  enrollmentId: number;
+  // Null only for an Enrollment no Purchase backs (see enrollments.seatId).
+  seatId: number | null;
+};
+
+export type UnenrollmentRefusal = { refusal: "not-enrolled" };
 
 export type MadePurchase = {
   purchaseId: number;
@@ -412,6 +428,19 @@ export function createSeatsModule(
       .get();
   }
 
+  // Every Unenrollment goes through here, whoever its Initiator is.
+  function endEnrollment(
+    tx: SeatsDatabase,
+    enrollmentId: number,
+    initiator: UnenrollmentInitiator,
+    at: string
+  ) {
+    tx.update(enrollments)
+      .set({ endedAt: at, unenrollmentInitiator: initiator })
+      .where(and(eq(enrollments.id, enrollmentId), isNull(enrollments.endedAt)))
+      .run();
+  }
+
   return {
     clock,
 
@@ -486,6 +515,31 @@ export function createSeatsModule(
       });
     },
 
+    /**
+     * A Student Unenrolls from a course: their active Enrollment ends, with
+     * the Student as Initiator. Its Seat becomes open again.
+     */
+    unenroll(input: {
+      studentId: number;
+      courseId: number;
+    }): Unenrolled | ({ ok: false } & UnenrollmentRefusal) {
+      return db.transaction((tx) => {
+        const active = activeEnrollment(input.studentId, input.courseId);
+        if (!active) return { ok: false, refusal: "not-enrolled" } as const;
+        endEnrollment(
+          tx,
+          active.enrollmentId,
+          UnenrollmentInitiator.Student,
+          now()
+        );
+        return {
+          ok: true,
+          enrollmentId: active.enrollmentId,
+          seatId: active.seatId,
+        } as const;
+      });
+    },
+
     // ─── Questions ───
 
     /** The Seat Price and PPP Country Restriction a Purchase would get now. */
@@ -533,14 +587,20 @@ export function createSeatsModule(
         .map((s) => s.id);
       const histories = seatHistories(seatIds);
 
-      const holderNames = names(
-        histories.flatMap((h) => seatHolderId(h) ?? [])
-      );
+      const studentNames = names([
+        ...new Set(
+          histories.flatMap((h) =>
+            h.events.flatMap((e) => (e.type === "enrolled" ? [e.studentId] : []))
+          )
+        ),
+      ]);
+      const person = (id: number): Holder => ({
+        id,
+        name: studentNames.get(id) ?? "Unknown",
+      });
       const holder = (h: SeatHistory): Holder | null => {
         const id = seatHolderId(h);
-        if (id === null) return null;
-        const name = holderNames.get(id);
-        return name === undefined ? null : { id, name };
+        return id === null ? null : person(id);
       };
 
       return purchaseRows.map((purchase) => ({
@@ -552,6 +612,10 @@ export function createSeatsModule(
             code: h.seatCode,
             state: seatState(h),
             holder: holder(h),
+            enrollments: seatEnrollments(h).map(({ studentId, ...e }) => ({
+              student: person(studentId),
+              ...e,
+            })),
           })),
       }));
     },
@@ -582,16 +646,39 @@ export function createSeatsModule(
 
 /** The Student whose Enrollment on the Seat is active, if any. */
 export function seatHolderId(history: SeatHistory): number | null {
-  const active = new Map<number, number>();
+  const active = seatEnrollments(history).find((e) => e.endedAt === null);
+  return active?.studentId ?? null;
+}
+
+/** One Enrollment in a Seat History: who, when, and how it ended. */
+export type EnrollmentOnSeat = {
+  studentId: number;
+  enrolledAt: string;
+  // Null while the Enrollment is active.
+  endedAt: string | null;
+  initiator: UnenrollmentInitiator | null;
+};
+
+/** Every Enrollment on the Seat, oldest first. */
+export function seatEnrollments(history: SeatHistory): EnrollmentOnSeat[] {
+  const byId = new Map<number, EnrollmentOnSeat>();
   for (const event of history.events) {
     if (event.type === "enrolled") {
-      active.set(event.enrollmentId, event.studentId);
+      byId.set(event.enrollmentId, {
+        studentId: event.studentId,
+        enrolledAt: event.at,
+        endedAt: null,
+        initiator: null,
+      });
     } else if (event.type === "unenrolled") {
-      active.delete(event.enrollmentId);
+      const enrollment = byId.get(event.enrollmentId);
+      if (enrollment) {
+        enrollment.endedAt = event.at;
+        enrollment.initiator = event.initiator;
+      }
     }
   }
-  const [holder] = active.values();
-  return holder ?? null;
+  return [...byId.values()];
 }
 
 /** Open, taken or refunded. */

@@ -2,7 +2,12 @@ import { useState } from "react";
 import { Link, data, isRouteErrorResponse } from "react-router";
 import type { Route } from "./+types/seats";
 import { getCurrentUserId } from "~/lib/session";
-import { createSeatsModule, type SeatState } from "~/lib/seats.server";
+import {
+  createSeatsModule,
+  type SeatEnrollment,
+  type SeatState,
+} from "~/lib/seats.server";
+import { UnenrollmentInitiator } from "~/db/schema";
 import { formatPrice } from "~/lib/utils";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
@@ -63,6 +68,32 @@ function SeatStateBadge({ state }: { state: SeatState }) {
     >
       {label}
     </span>
+  );
+}
+
+const initiatorLabel: Record<UnenrollmentInitiator, string> = {
+  [UnenrollmentInitiator.Student]: "by the Student",
+  [UnenrollmentInitiator.Buyer]: "by you",
+  [UnenrollmentInitiator.Admin]: "by an Admin",
+  [UnenrollmentInitiator.CourseOwner]: "by the Course Owner",
+  [UnenrollmentInitiator.System]: "on a Refund Approval",
+};
+
+/** Every Enrollment on a Seat, so the Buyer sees who used it and who left. */
+function SeatEnrollments({ enrollments }: { enrollments: SeatEnrollment[] }) {
+  if (enrollments.length === 0) return <>—</>;
+  return (
+    <ul className="space-y-1 text-xs">
+      {enrollments.map((e) => (
+        <li key={`${e.student.id}-${e.enrolledAt}`}>
+          {e.student.name} enrolled {formatDate(e.enrolledAt)}
+          {e.endedAt &&
+            `, unenrolled ${formatDate(e.endedAt)}${
+              e.initiator ? ` ${initiatorLabel[e.initiator]}` : ""
+            }`}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -185,6 +216,9 @@ export default function Seats({ loaderData }: Route.ComponentProps) {
                           Held by
                         </th>
                         <th className="px-4 py-3 text-left font-medium">
+                          History
+                        </th>
+                        <th className="px-4 py-3 text-left font-medium">
                           Action
                         </th>
                       </tr>
@@ -202,6 +236,9 @@ export default function Seats({ loaderData }: Route.ComponentProps) {
                           </td>
                           <td className="px-4 py-3 text-muted-foreground">
                             {seat.holder?.name ?? "—"}
+                          </td>
+                          <td className="px-4 py-3 text-muted-foreground">
+                            <SeatEnrollments enrollments={seat.enrollments} />
                           </td>
                           <td className="px-4 py-3">
                             {seat.state === "open" && (

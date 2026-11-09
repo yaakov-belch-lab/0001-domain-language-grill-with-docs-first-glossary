@@ -14,7 +14,7 @@ import {
   enrollments,
   CourseStatus,
 } from "~/db/schema";
-import { eq, or, sql } from "drizzle-orm";
+import { eq, or, sql, and, isNull } from "drizzle-orm";
 import { createSeatsModule } from "~/lib/seats.server";
 import { mirrorSeatsAsCoupons } from "~/lib/coupon-mirror.server";
 import { Card, CardContent } from "~/components/ui/card";
@@ -118,7 +118,9 @@ function getEnrollmentCountForCourse(courseId: number) {
   const result = db
     .select({ count: sql<number>`count(*)` })
     .from(enrollments)
-    .where(eq(enrollments.courseId, courseId))
+    .where(
+      and(eq(enrollments.courseId, courseId), isNull(enrollments.endedAt))
+    )
     .get();
 
   return result?.count ?? 0;

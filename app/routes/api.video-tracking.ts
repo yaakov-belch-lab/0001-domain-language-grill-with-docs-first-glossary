@@ -1,10 +1,12 @@
 import { data } from "react-router";
 import { z } from "zod";
 import type { Route } from "./+types/api.video-tracking";
+import { eq } from "drizzle-orm";
 import { getCurrentUserId } from "~/lib/session";
+import { requireContentAccess } from "~/lib/access.server";
 import { parseJsonBody } from "~/lib/validation";
 import { db } from "~/db";
-import { videoWatchEvents } from "~/db/schema";
+import { lessons, modules, videoWatchEvents } from "~/db/schema";
 
 const videoTrackingSchema = z.object({
   lessonId: z.number(),
@@ -25,6 +27,19 @@ export async function action({ request }: Route.ActionArgs) {
   }
 
   const { lessonId, eventType, positionSeconds } = parsed.data;
+
+  // Watched time is progress tracking: it needs an active Enrollment, so it
+  // stops at an Unenrollment like the lesson itself.
+  const lesson = db
+    .select({ courseId: modules.courseId })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(lessons.id, lessonId))
+    .get();
+  if (!lesson) {
+    throw data("Lesson not found", { status: 404 });
+  }
+  await requireContentAccess(request, lesson.courseId);
 
   db
     .insert(videoWatchEvents)

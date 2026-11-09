@@ -944,6 +944,12 @@ export async function action({ params, request }: Route.ActionArgs) {
     }
   }
 
+  // Progress tracking and quizzes need an active Enrollment too: after an
+  // Unenrollment they are as closed as the lesson itself.
+  if (intent === "mark-complete" || intent === "submit-quiz") {
+    await requireContentAccess(request, course.id);
+  }
+
   if (intent === "mark-complete") {
     markLessonComplete(currentUserId, lessonId);
     return { success: true };

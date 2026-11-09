@@ -60,14 +60,34 @@ describe("a Buyer's Purchases", () => {
     });
     // The Buyer hands out the Seat Code of each open Seat, so it must be shown.
     expect(purchase.seats).toEqual([
-      { id: bought[0].id, code: bought[0].code, state: "open", holder: null },
+      {
+        id: bought[0].id,
+        code: bought[0].code,
+        state: "open",
+        holder: null,
+        enrollments: [],
+      },
       {
         id: bought[1].id,
         code: bought[1].code,
         state: "taken",
         holder: { id: olivia.id, name: "Olivia" },
+        enrollments: [
+          {
+            student: { id: olivia.id, name: "Olivia" },
+            enrolledAt: "2026-10-02T09:00:00.000Z",
+            endedAt: null,
+            initiator: null,
+          },
+        ],
       },
-      { id: bought[2].id, code: bought[2].code, state: "open", holder: null },
+      {
+        id: bought[2].id,
+        code: bought[2].code,
+        state: "open",
+        holder: null,
+        enrollments: [],
+      },
     ]);
   });
 
@@ -934,5 +954,195 @@ describe("the PPP Restriction Check on course content", () => {
         country: "US",
       })
     ).toEqual({ blocked: false });
+  });
+});
+
+describe("Unenroll", () => {
+  // A Buyer's Purchase of 2 Seats, with Ana enrolled on the first.
+  function anaOnASeat() {
+    const buyer = scenario.person("Buyer");
+    const ana = scenario.person("Ana");
+    const course = scenario.course("Course");
+    const { seats: bought } = scenario.purchase(buyer, course, {
+      seatCount: 2,
+      seatPrice: 7900,
+      at: "2026-11-01T00:00:00.000Z",
+    });
+    const enrollment = scenario.enroll(
+      ana,
+      bought[0],
+      "2026-11-02T00:00:00.000Z"
+    );
+    return { buyer, ana, course, seat: bought[0], enrollment };
+  }
+
+  it("ends the Enrollment, recording the time and the Student as Initiator", () => {
+    const { ana, course, seat, enrollment } = anaOnASeat();
+
+    const result = seats.unenroll({ studentId: ana.id, courseId: course.id });
+
+    expect(result).toEqual({
+      ok: true,
+      enrollmentId: enrollment.id,
+      seatId: seat.id,
+    });
+    // The Unenrollment is part of the Seat History, so later decisions about
+    // the Seat (who may enroll on it, its Seat Usage) can see it.
+    expect(seats.seatHistory(seat.id)?.events.at(-1)).toEqual({
+      type: "unenrolled",
+      at: fixedClock().toISOString(),
+      enrollmentId: enrollment.id,
+      studentId: ana.id,
+      initiator: UnenrollmentInitiator.Student,
+    });
+  });
+
+  it("takes away the Student's access: they have no active Enrollment in the course", () => {
+    const { ana, course } = anaOnASeat();
+
+    seats.unenroll({ studentId: ana.id, courseId: course.id });
+
+    // Every "is enrolled" check (lessons, quizzes, progress tracking) asks
+    // this question, so no active Enrollment means no access.
+    expect(seats.activeEnrollment(ana.id, course.id)).toBeUndefined();
+  });
+
+  it("refuses a Student with no active Enrollment in the course", () => {
+    const { ana, course } = anaOnASeat();
+    seats.unenroll({ studentId: ana.id, courseId: course.id });
+
+    // A second Unenrollment would have nothing to end.
+    expect(seats.unenroll({ studentId: ana.id, courseId: course.id })).toEqual(
+      { ok: false, refusal: "not-enrolled" }
+    );
+  });
+
+  it("only ends the Enrollment in that course", () => {
+    const { ana, course } = anaOnASeat();
+    const other = scenario.course("Other");
+    const { seats: bought } = scenario.purchase(ana, other, {
+      seatPrice: 5000,
+      at: "2026-11-01T00:00:00.000Z",
+    });
+    scenario.enroll(ana, bought[0], "2026-11-01T00:00:00.000Z");
+
+    seats.unenroll({ studentId: ana.id, courseId: course.id });
+
+    expect(seats.activeEnrollment(ana.id, other.id)).toBeDefined();
+  });
+
+  it("opens the Seat again, and the Buyer sees its history", () => {
+    const { buyer, ana, course, seat } = anaOnASeat();
+
+    seats.unenroll({ studentId: ana.id, courseId: course.id });
+
+    const shown = seats
+      .buyerPurchases(buyer.id)[0]
+      .seats.find((s) => s.id === seat.id);
+    expect(shown).toMatchObject({ state: "open", holder: null });
+    // The Buyer can tell a Seat nobody used from one a Student has left.
+    expect(shown?.enrollments).toEqual([
+      {
+        student: { id: ana.id, name: "Ana" },
+        enrolledAt: "2026-11-02T00:00:00.000Z",
+        endedAt: fixedClock().toISOString(),
+        initiator: UnenrollmentInitiator.Student,
+      },
+    ]);
+  });
+
+  it("lets the same Student enroll on the Seat again", () => {
+    const { ana, course, seat } = anaOnASeat();
+    seats.unenroll({ studentId: ana.id, courseId: course.id });
+
+    const again = seats.enrollWithSeatCode({
+      studentId: ana.id,
+      seatCode: seat.code,
+      country: null,
+    });
+
+    expect(again).toMatchObject({ ok: true, seatId: seat.id });
+    expect(seats.activeEnrollment(ana.id, course.id)).toEqual(
+      expect.objectContaining({ seatId: seat.id })
+    );
+  });
+
+  it("refuses the Seat to another Student (Seat Reuse Limit 1)", () => {
+    const { ana, course, seat } = anaOnASeat();
+    const ben = scenario.person("Ben");
+    seats.unenroll({ studentId: ana.id, courseId: course.id });
+
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ben.id,
+        seatCode: seat.code,
+        country: null,
+      })
+    ).toEqual({ ok: false, refusal: "used-by-another-student" });
+  });
+
+  it("lets a Buyer leave the Seat of their Personal Purchase and come back", () => {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Course");
+    const bought = seats.personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: null,
+    });
+    if (!bought.ok) throw new Error("Personal Purchase refused");
+
+    seats.unenroll({ studentId: liam.id, courseId: course.id });
+    const [seat] = seats.buyerPurchases(liam.id)[0].seats;
+
+    expect(seat.state).toBe("open");
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: liam.id,
+        seatCode: seat.code,
+        country: null,
+      }).ok
+    ).toBe(true);
+  });
+});
+
+describe("Completion", () => {
+  it("never ends an Enrollment", () => {
+    const ana = scenario.person("Ana");
+    const course = scenario.course("Course");
+    const { seats: bought } = scenario.purchase(ana, course, {
+      seatPrice: 7900,
+      at: "2026-11-01T00:00:00.000Z",
+    });
+    const enrollment = scenario.enroll(
+      ana,
+      bought[0],
+      "2026-11-01T00:00:00.000Z"
+    );
+    scenario.complete(enrollment, "2026-11-05T00:00:00.000Z");
+
+    // A Student who finished the course keeps access to it.
+    expect(seats.activeEnrollment(ana.id, course.id)).toEqual(
+      expect.objectContaining({ enrollmentId: enrollment.id })
+    );
+    expect(seats.buyerPurchases(ana.id)[0].seats[0].state).toBe("taken");
+  });
+
+  it("does not limit an Enrollment: a Student who completed the course can still Unenroll", () => {
+    const ana = scenario.person("Ana");
+    const course = scenario.course("Course");
+    const { seats: bought } = scenario.purchase(ana, course, {
+      seatPrice: 7900,
+      at: "2026-11-01T00:00:00.000Z",
+    });
+    const enrollment = scenario.enroll(
+      ana,
+      bought[0],
+      "2026-11-01T00:00:00.000Z"
+    );
+    scenario.complete(enrollment, "2026-11-05T00:00:00.000Z");
+
+    expect(seats.unenroll({ studentId: ana.id, courseId: course.id }).ok).toBe(
+      true
+    );
   });
 });

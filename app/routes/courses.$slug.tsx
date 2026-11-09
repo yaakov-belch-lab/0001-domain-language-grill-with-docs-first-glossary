@@ -11,7 +11,6 @@ import {
   users,
   modules,
   lessons,
-  enrollments,
   lessonProgress,
   courseRatings,
   purchases,
@@ -55,6 +54,7 @@ import {
   getDiscountForCountry,
 } from "~/lib/ppp";
 import { parseFormData } from "~/lib/validation";
+import { createSeatsModule } from "~/lib/seats.server";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
 
@@ -137,15 +137,11 @@ function getLessonCountForCourse(courseId: number) {
   return count?.count ?? 0;
 }
 
+const seats = createSeatsModule();
+
+// Only an active Enrollment counts: an Unenrollment takes access away.
 function isUserEnrolled(userId: number, courseId: number) {
-  const enrollment = db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-  return !!enrollment;
+  return !!seats.activeEnrollment(userId, courseId);
 }
 
 function getCourseLessonIds(courseId: number): number[] {
@@ -583,8 +579,8 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   };
 }
 
-// Enrollment is handled via the purchase confirmation page — this action only
-// records star ratings.
+// Enrollment is handled via the purchase confirmation page and Unenrollment
+// via the unenroll route — this action only records star ratings.
 export async function action({ params, request }: Route.ActionArgs) {
   const currentUserId = await getCurrentUserId(request);
 
@@ -691,6 +687,16 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
       setSearchParams(
         (prev) => {
           prev.delete("already_enrolled");
+          return prev;
+        },
+        { replace: true }
+      );
+    }
+    if (searchParams.get("unenrolled") === "1") {
+      toast.success("You have unenrolled from this course.");
+      setSearchParams(
+        (prev) => {
+          prev.delete("unenrolled");
           return prev;
         },
         { replace: true }
@@ -922,6 +928,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                       amount={cancellation.amount}
                     />
                   )}
+                  <Unenroll slug={course.slug} />
                 </>
               ) : (
                 enrollButton
@@ -1051,6 +1058,60 @@ function CancelPurchase({ slug, amount }: { slug: string; amount: number }) {
             Keep it
           </Button>
         </div>
+      </fetcher.Form>
+    </div>
+  );
+}
+
+function Unenroll({ slug }: { slug: string }) {
+  const fetcher = useFetcher();
+  const [isConfirming, setIsConfirming] = useState(false);
+  const isSubmitting = fetcher.state !== "idle";
+
+  if (!isConfirming) {
+    return (
+      <div className="border-t pt-4">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full text-muted-foreground"
+          onClick={() => setIsConfirming(true)}
+        >
+          Unenroll
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="border-t pt-4">
+      <p className="mb-2 text-sm font-medium">Unenroll from this course?</p>
+      <p className="mb-3 text-xs text-muted-foreground">
+        You will lose access to its lessons and quizzes. Unenrolling does not
+        give you any money back. You can enroll again later with the Seat
+        Code of the same Seat, as long as it has not been refunded.
+      </p>
+      <fetcher.Form
+        method="post"
+        action={`/courses/${slug}/unenroll`}
+        className="flex gap-2"
+      >
+        <Button
+          type="submit"
+          variant="destructive"
+          size="sm"
+          disabled={isSubmitting}
+        >
+          {isSubmitting ? "Unenrolling..." : "Unenroll"}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() => setIsConfirming(false)}
+        >
+          Stay enrolled
+        </Button>
       </fetcher.Form>
     </div>
   );

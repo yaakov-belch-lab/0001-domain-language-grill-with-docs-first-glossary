@@ -2,10 +2,10 @@ import { Link } from "react-router";
 import type { Route } from "./+types/courses.$slug.$moduleId";
 import { getCurrentUserId } from "~/lib/session";
 import { db } from "~/db";
+import { createSeatsModule } from "~/lib/seats.server";
 import {
   categories,
   courses,
-  enrollments,
   lessonProgress,
   lessons,
   modules,
@@ -111,16 +111,11 @@ function getModuleWithLessons(id: number) {
   return { ...mod, lessons: moduleLessons };
 }
 
-function isUserEnrolled(userId: number, courseId: number) {
-  const existing = db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
+const seats = createSeatsModule();
 
-  return !!existing;
+// Only an active Enrollment counts: an Unenrollment takes access away.
+function isUserEnrolled(userId: number, courseId: number) {
+  return !!seats.activeEnrollment(userId, courseId);
 }
 
 function getLessonProgressForCourse(userId: number, courseId: number) {
