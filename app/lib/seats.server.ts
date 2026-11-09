@@ -582,6 +582,40 @@ export function createSeatsModule(
       .map((l) => l.id);
   }
 
+  // A lesson keeps the time it was first completed.
+  function recordLessonCompleted(
+    tx: SeatsDatabase,
+    userId: number,
+    lessonId: number,
+    at: string
+  ) {
+    const progress = tx
+      .select()
+      .from(lessonProgress)
+      .where(
+        and(
+          eq(lessonProgress.userId, userId),
+          eq(lessonProgress.lessonId, lessonId)
+        )
+      )
+      .get();
+    if (!progress) {
+      tx.insert(lessonProgress)
+        .values({
+          userId,
+          lessonId,
+          status: LessonProgressStatus.Completed,
+          completedAt: at,
+        })
+        .run();
+    } else if (progress.status !== LessonProgressStatus.Completed) {
+      tx.update(lessonProgress)
+        .set({ status: LessonProgressStatus.Completed, completedAt: at })
+        .where(eq(lessonProgress.id, progress.id))
+        .run();
+    }
+  }
+
   /**
    * Seat Usage: what was watched and completed while enrolled on the Seat,
    * summed over every Enrollment in its Seat History.
@@ -869,31 +903,7 @@ export function createSeatsModule(
         }
 
         const at = now();
-        const progress = tx
-          .select()
-          .from(lessonProgress)
-          .where(
-            and(
-              eq(lessonProgress.userId, input.studentId),
-              eq(lessonProgress.lessonId, input.lessonId)
-            )
-          )
-          .get();
-        if (!progress) {
-          tx.insert(lessonProgress)
-            .values({
-              userId: input.studentId,
-              lessonId: input.lessonId,
-              status: LessonProgressStatus.Completed,
-              completedAt: at,
-            })
-            .run();
-        } else if (progress.status !== LessonProgressStatus.Completed) {
-          tx.update(lessonProgress)
-            .set({ status: LessonProgressStatus.Completed, completedAt: at })
-            .where(eq(lessonProgress.id, progress.id))
-            .run();
-        }
+        recordLessonCompleted(tx, input.studentId, input.lessonId, at);
 
         const enrollment = tx
           .select({ id: enrollments.id, completedAt: enrollments.completedAt })
