@@ -4,7 +4,10 @@ import { db } from "~/db";
 import { UserRole, users, courses } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
-import { createSeatsModule } from "~/lib/seats.server";
+import {
+  createSeatsModule,
+  type PppRestrictionCheck,
+} from "~/lib/seats.server";
 
 const seats = createSeatsModule();
 
@@ -75,14 +78,14 @@ export async function getAccess(
 
   // The PPP Restriction Check uses the PPP Country Restriction of the
   // Purchase behind the active Enrollment, for every Student. Staff are exempt.
-  const ppp =
+  const ppp: PppRestrictionCheck =
     enrolled && !isStaff
       ? seats.pppRestrictionCheck({
           studentId: userId,
           courseId,
           country: await resolveCountry(request),
         })
-      : ({ blocked: false } as const);
+      : { blocked: false };
 
   return {
     userId,

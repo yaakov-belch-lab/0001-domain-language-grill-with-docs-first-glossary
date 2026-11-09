@@ -1,9 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
-import * as schema from "~/db/schema";
 import { createTestDb, type TestDb } from "~/test/setup";
 import { seatScenario } from "~/test/seat-scenarios";
-import { UnenrollmentInitiator } from "~/db/schema";
+import { UnenrollmentInitiator, courses } from "~/db/schema";
 import { createSeatsModule } from "./seats.server";
 
 const fixedClock = () => new Date("2026-11-09T12:00:00.000Z");
@@ -836,9 +835,9 @@ describe("the PPP Restriction Check on course content", () => {
     });
     expect(bought.ok).toBe(true);
 
-    db.update(schema.courses)
+    db.update(courses)
       .set({ pppEnabled: true })
-      .where(eq(schema.courses.id, course.id))
+      .where(eq(courses.id, course.id))
       .run();
 
     expect(
