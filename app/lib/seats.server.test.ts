@@ -1597,16 +1597,27 @@ describe("making a Refund Request", () => {
     const ana = scenario.person("Ana");
 
     expect(
-      seatsAt(local(2)).requestRefund({ buyerId: ana.id, seatId, reason: REASON })
+      seatsAt(local(2)).requestRefund({
+        buyerId: ana.id,
+        seatId,
+        reason: REASON,
+      })
     ).toEqual({ ok: false, refusal: "not-buyer" });
   });
 
   it("offers the Seat Price paid, not today's Course Price (#2)", () => {
     const { liam, course, seatId } = liamsPersonalPurchase();
-    db.update(courses).set({ price: 12900 }).where(eq(courses.id, course.id)).run();
+    db.update(courses)
+      .set({ price: 12900 })
+      .where(eq(courses.id, course.id))
+      .run();
 
     expect(
-      seatsAt(local(2)).requestRefund({ buyerId: liam.id, seatId, reason: REASON })
+      seatsAt(local(2)).requestRefund({
+        buyerId: liam.id,
+        seatId,
+        reason: REASON,
+      })
     ).toMatchObject({ ok: true, refundAmount: 7900 });
   });
 
