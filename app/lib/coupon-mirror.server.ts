@@ -5,8 +5,9 @@ import type { MadePurchase } from "~/lib/seats.server";
 
 // Temporary (spec #11, issue #13): the analytics page still reads teams and
 // coupons. Until it moves to the seats module, every Seat bought through a
-// Purchase of several Seats is also written as a coupon with the same code, and every Enrollment with a Seat Code marks that coupon as
-// redeemed. Delete this file when teams and coupons are dropped.
+// Purchase of several Seats is also written as a coupon with the same code,
+// and every Enrollment with a Seat Code marks that coupon as redeemed. Delete
+// this file when teams and coupons are dropped.
 
 /** Writes the Seats of a Purchase as coupons of the Buyer's team. */
 export function mirrorSeatsAsCoupons(
