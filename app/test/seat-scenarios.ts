@@ -40,7 +40,11 @@ export function seatScenario(db: TestDb) {
   return {
     person,
 
-    course(title: string, coursePrice = 7900) {
+    course(
+      title: string,
+      coursePrice = 7900,
+      options: { pppEnabled?: boolean } = {}
+    ) {
       return db
         .insert(schema.courses)
         .values({
@@ -52,6 +56,7 @@ export function seatScenario(db: TestDb) {
           categoryId: category.id,
           status: schema.CourseStatus.Published,
           price: coursePrice,
+          pppEnabled: options.pppEnabled ?? false,
         })
         .returning()
         .get();

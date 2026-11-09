@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { db as appDb } from "~/db";
@@ -12,6 +13,7 @@ import {
   UnenrollmentInitiator,
   users,
 } from "~/db/schema";
+import { calculatePppPrice } from "~/lib/ppp";
 
 // The seats module owns the model in ADR 0001: a Purchase is a set of Seats,
 // and every Enrollment is made on a Seat. Every answer about a Seat is derived
@@ -89,6 +91,41 @@ export type ActiveEnrollment = {
   // Null only for an Enrollment no Purchase backs (see enrollments.seatId).
   seatId: number | null;
   enrolledAt: string;
+};
+
+/** How many different Students one Seat may serve over its Seat History. */
+export const SEAT_REUSE_LIMIT = 1;
+
+/** What a Seat of a course costs a Buyer in a given country, right now. */
+export type SeatQuote = {
+  coursePrice: number;
+  seatPrice: number;
+  // The country of purchase when a PPP Discount is given, otherwise null.
+  pppCountryRestriction: string | null;
+};
+
+export type EnrollmentRefusal =
+  | { refusal: "unknown-seat-code" }
+  | { refusal: "refunded" }
+  | { refusal: "used-by-another-student" }
+  | { refusal: "already-enrolled" }
+  | { refusal: "country-mismatch"; country: string };
+
+export type EnrollmentEligibility =
+  | { eligible: true; seat: SeatHistory }
+  // `seat` is null only for an unknown Seat Code.
+  | ({ eligible: false; seat: SeatHistory | null } & EnrollmentRefusal);
+
+export type Enrolled = {
+  ok: true;
+  enrollmentId: number;
+  seatId: number;
+  courseId: number;
+};
+
+export type MadePurchase = {
+  purchaseId: number;
+  seats: { id: number; code: string }[];
 };
 
 export function createSeatsModule(
@@ -204,8 +241,220 @@ export function createSeatsModule(
     );
   }
 
+  function now() {
+    return clock().toISOString();
+  }
+
+  function quote(courseId: number, country: string | null): SeatQuote {
+    const course = db
+      .select({ price: courses.price, pppEnabled: courses.pppEnabled })
+      .from(courses)
+      .where(eq(courses.id, courseId))
+      .get();
+    if (!course) throw new Error(`No course ${courseId}`);
+
+    const seatPrice = course.pppEnabled
+      ? calculatePppPrice(course.price, country)
+      : course.price;
+    return {
+      coursePrice: course.price,
+      seatPrice,
+      pppCountryRestriction:
+        country !== null && seatPrice < course.price ? country : null,
+    };
+  }
+
+  // Make a Purchase of N Seats. Callers run it inside a transaction.
+  function makePurchase(
+    tx: SeatsDatabase,
+    input: {
+      buyerId: number;
+      courseId: number;
+      seatCount: number;
+      country: string | null;
+    },
+    at: string
+  ): MadePurchase {
+    if (!Number.isInteger(input.seatCount) || input.seatCount < 1) {
+      throw new Error("A Purchase has one or more Seats");
+    }
+    const { seatPrice, pppCountryRestriction } = quote(
+      input.courseId,
+      input.country
+    );
+    const purchase = tx
+      .insert(purchases)
+      .values({
+        userId: input.buyerId,
+        courseId: input.courseId,
+        seatCount: input.seatCount,
+        seatPrice,
+        amountPaid: input.seatCount * seatPrice,
+        country: input.country,
+        pppCountryRestriction,
+        createdAt: at,
+      })
+      .returning({ id: purchases.id })
+      .get();
+    const made = tx
+      .insert(seats)
+      .values(
+        Array.from({ length: input.seatCount }, () => ({
+          purchaseId: purchase.id,
+          code: newSeatCode(),
+          createdAt: at,
+        }))
+      )
+      .returning({ id: seats.id, code: seats.code })
+      .all();
+    return { purchaseId: purchase.id, seats: made };
+  }
+
+  function activeEnrollment(
+    studentId: number,
+    courseId: number
+  ): ActiveEnrollment | undefined {
+    return db
+      .select({
+        enrollmentId: enrollments.id,
+        seatId: enrollments.seatId,
+        enrolledAt: enrollments.enrolledAt,
+      })
+      .from(enrollments)
+      .where(
+        and(
+          eq(enrollments.userId, studentId),
+          eq(enrollments.courseId, courseId),
+          isNull(enrollments.endedAt)
+        )
+      )
+      .get();
+  }
+
+  function enrollmentEligibility(input: {
+    studentId: number;
+    seatCode: string;
+    country: string | null;
+  }): EnrollmentEligibility {
+    const seat = db
+      .select({ id: seats.id })
+      .from(seats)
+      .where(eq(seats.code, input.seatCode))
+      .get();
+    const history = seat && seatHistories([seat.id])[0];
+    if (!history) {
+      return { eligible: false, seat: null, refusal: "unknown-seat-code" };
+    }
+
+    const refusal = decideEnrollmentEligibility(history, {
+      studentId: input.studentId,
+      country: input.country,
+      alreadyEnrolled: !!activeEnrollment(input.studentId, history.courseId),
+    });
+    return refusal
+      ? { eligible: false, seat: history, ...refusal }
+      : { eligible: true, seat: history };
+  }
+
+  function enroll(
+    tx: SeatsDatabase,
+    studentId: number,
+    seat: { id: number; courseId: number },
+    at: string
+  ) {
+    return tx
+      .insert(enrollments)
+      .values({
+        userId: studentId,
+        courseId: seat.courseId,
+        seatId: seat.id,
+        enrolledAt: at,
+      })
+      .returning({ id: enrollments.id })
+      .get();
+  }
+
   return {
     clock,
+
+    // ─── Acts ───
+
+    /** A Buyer makes a Purchase of N Seats. The Buyer is not enrolled. */
+    buySeats(input: {
+      buyerId: number;
+      courseId: number;
+      seatCount: number;
+      country: string | null;
+    }): MadePurchase {
+      return db.transaction((tx) => makePurchase(tx, input, now()));
+    },
+
+    /** Buy one Seat and enroll the Buyer on it at once. */
+    personalPurchase(input: {
+      buyerId: number;
+      courseId: number;
+      country: string | null;
+    }):
+      | (Enrolled & { purchaseId: number })
+      | ({ ok: false } & EnrollmentRefusal) {
+      return db.transaction((tx) => {
+        if (activeEnrollment(input.buyerId, input.courseId)) {
+          return { ok: false, refusal: "already-enrolled" } as const;
+        }
+        const at = now();
+        const made = makePurchase(tx, { ...input, seatCount: 1 }, at);
+        const [seat] = made.seats;
+        const enrollment = enroll(
+          tx,
+          input.buyerId,
+          { id: seat.id, courseId: input.courseId },
+          at
+        );
+        return {
+          ok: true,
+          enrollmentId: enrollment.id,
+          seatId: seat.id,
+          courseId: input.courseId,
+          purchaseId: made.purchaseId,
+        } as const;
+      });
+    },
+
+    /** A Student Enrolls on the Seat a Seat Code identifies. */
+    enrollWithSeatCode(input: {
+      studentId: number;
+      seatCode: string;
+      country: string | null;
+    }): Enrolled | ({ ok: false } & EnrollmentRefusal) {
+      return db.transaction((tx) => {
+        const eligibility = enrollmentEligibility(input);
+        if (!eligibility.eligible) {
+          const { eligible: _, seat: __, ...refusal } = eligibility;
+          return { ok: false, ...refusal };
+        }
+        const { seat } = eligibility;
+        const enrollment = enroll(
+          tx,
+          input.studentId,
+          { id: seat.seatId, courseId: seat.courseId },
+          now()
+        );
+        return {
+          ok: true,
+          enrollmentId: enrollment.id,
+          seatId: seat.seatId,
+          courseId: seat.courseId,
+        };
+      });
+    },
+
+    // ─── Questions ───
+
+    /** The Seat Price and PPP Country Restriction a Purchase would get now. */
+    quote,
+
+    /** Whether a person may Enroll now on the Seat a Seat Code identifies. */
+    enrollmentEligibility,
 
     /** A Seat's Seat History, or undefined for an unknown Seat. */
     seatHistory(seatId: number): SeatHistory | undefined {
@@ -269,26 +518,7 @@ export function createSeatsModule(
     },
 
     /** A person's active Enrollment in a course, and its Seat. */
-    activeEnrollment(
-      studentId: number,
-      courseId: number
-    ): ActiveEnrollment | undefined {
-      return db
-        .select({
-          enrollmentId: enrollments.id,
-          seatId: enrollments.seatId,
-          enrolledAt: enrollments.enrolledAt,
-        })
-        .from(enrollments)
-        .where(
-          and(
-            eq(enrollments.userId, studentId),
-            eq(enrollments.courseId, courseId),
-            isNull(enrollments.endedAt)
-          )
-        )
-        .get();
-    },
+    activeEnrollment,
   };
 }
 
@@ -314,4 +544,46 @@ export function seatState(history: SeatHistory): SeatState {
     return "refunded";
   }
   return seatHolderId(history) === null ? "open" : "taken";
+}
+
+/**
+ * Enrollment Eligibility: why a Student may not Enroll on a Seat now, or
+ * null when they may.
+ */
+export function decideEnrollmentEligibility(
+  history: SeatHistory,
+  person: {
+    studentId: number;
+    country: string | null;
+    alreadyEnrolled: boolean;
+  }
+): EnrollmentRefusal | null {
+  if (seatState(history) === "refunded") return { refusal: "refunded" };
+
+  const holder = seatHolderId(history);
+  const students = new Set(
+    history.events.flatMap((e) => (e.type === "enrolled" ? [e.studentId] : []))
+  );
+  students.add(person.studentId);
+  if (
+    (holder !== null && holder !== person.studentId) ||
+    students.size > SEAT_REUSE_LIMIT
+  ) {
+    return { refusal: "used-by-another-student" };
+  }
+
+  if (person.alreadyEnrolled) return { refusal: "already-enrolled" };
+
+  // The PPP Restriction Check applies only to Purchases made with a PPP
+  // Discount (#8).
+  const restriction = history.pppCountryRestriction;
+  if (restriction !== null && person.country !== restriction) {
+    return { refusal: "country-mismatch", country: restriction };
+  }
+
+  return null;
+}
+
+function newSeatCode() {
+  return crypto.randomBytes(12).toString("base64url");
 }

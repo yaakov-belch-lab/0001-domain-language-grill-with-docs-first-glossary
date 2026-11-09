@@ -341,3 +341,412 @@ describe("a person's active Enrollment in a course", () => {
     expect(seats.activeEnrollment(ana.id, other.id)).toBeUndefined();
   });
 });
+
+describe("a Personal Purchase", () => {
+  it("buys one Seat at the Course Price and enrolls the Buyer on it", () => {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Introduction to TypeScript", 7900);
+
+    const result = seats.personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: "US",
+    });
+
+    expect(result.ok).toBe(true);
+    const [purchase] = seats.buyerPurchases(liam.id);
+    // Amount Paid is one Seat times the Seat Price. A full-price Purchase
+    // carries no PPP Country Restriction.
+    expect(purchase).toMatchObject({
+      seatCount: 1,
+      seatPrice: 7900,
+      amountPaid: 7900,
+      pppCountryRestriction: null,
+    });
+    expect(purchase.seats).toEqual([
+      expect.objectContaining({
+        state: "taken",
+        holder: { id: liam.id, name: "Liam" },
+      }),
+    ]);
+    expect(seats.activeEnrollment(liam.id, course.id)).toEqual(
+      expect.objectContaining({ seatId: purchase.seats[0].id })
+    );
+  });
+
+  it("records the PPP Country Restriction when a PPP Discount was given", () => {
+    const priya = scenario.person("Priya");
+    const course = scenario.course("Course", 8000, { pppEnabled: true });
+
+    seats.personalPurchase({
+      buyerId: priya.id,
+      courseId: course.id,
+      country: "IN",
+    });
+
+    expect(seats.buyerPurchases(priya.id)[0]).toMatchObject({
+      seatPrice: 4000,
+      amountPaid: 4000,
+      pppCountryRestriction: "IN",
+    });
+  });
+
+  it("gives no PPP Country Restriction when the course has no PPP, whatever the country", () => {
+    const priya = scenario.person("Priya");
+    const course = scenario.course("Course", 8000);
+
+    seats.personalPurchase({
+      buyerId: priya.id,
+      courseId: course.id,
+      country: "IN",
+    });
+
+    expect(seats.buyerPurchases(priya.id)[0]).toMatchObject({
+      seatPrice: 8000,
+      pppCountryRestriction: null,
+    });
+  });
+
+  it("is refused to a Student already actively enrolled in the course", () => {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Course");
+    seats.personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: null,
+    });
+
+    const again = seats.personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: null,
+    });
+
+    expect(again).toEqual({ ok: false, refusal: "already-enrolled" });
+    expect(seats.buyerPurchases(liam.id)).toHaveLength(1);
+  });
+
+  it("buys the course again after the Student has unenrolled", () => {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Course");
+    const { seats: bought } = scenario.purchase(liam, course, {
+      seatPrice: 7900,
+      at: "2026-10-01T00:00:00.000Z",
+    });
+    const enrollment = scenario.enroll(
+      liam,
+      bought[0],
+      "2026-10-01T00:00:00.000Z"
+    );
+    scenario.unenroll(
+      enrollment,
+      UnenrollmentInitiator.Student,
+      "2026-10-02T00:00:00.000Z"
+    );
+
+    expect(
+      seats.personalPurchase({
+        buyerId: liam.id,
+        courseId: course.id,
+        country: null,
+      }).ok
+    ).toBe(true);
+  });
+});
+
+describe("buying Seats", () => {
+  it("makes a Purchase of N open Seats, each with its own Seat Code, without enrolling the Buyer", () => {
+    const bossy = scenario.person("Bossy");
+    const course = scenario.course("Building REST APIs", 5999);
+
+    seats.buySeats({
+      buyerId: bossy.id,
+      courseId: course.id,
+      seatCount: 3,
+      country: "US",
+    });
+
+    const [purchase] = seats.buyerPurchases(bossy.id);
+    expect(purchase).toMatchObject({
+      seatCount: 3,
+      seatPrice: 5999,
+      amountPaid: 3 * 5999,
+      pppCountryRestriction: null,
+    });
+    expect(purchase.seats.map((s) => s.state)).toEqual([
+      "open",
+      "open",
+      "open",
+    ]);
+    // Each Seat Code identifies one Seat, so the Buyer can hand them out.
+    expect(new Set(purchase.seats.map((s) => s.code)).size).toBe(3);
+    expect(seats.activeEnrollment(bossy.id, course.id)).toBeUndefined();
+  });
+
+  it("gives every Seat the PPP Seat Price and the Purchase a PPP Country Restriction", () => {
+    const buyer = scenario.person("Buyer");
+    const course = scenario.course("Course", 10000, { pppEnabled: true });
+
+    seats.buySeats({
+      buyerId: buyer.id,
+      courseId: course.id,
+      seatCount: 2,
+      country: "BR",
+    });
+
+    expect(seats.buyerPurchases(buyer.id)[0]).toMatchObject({
+      seatPrice: 7000,
+      amountPaid: 14000,
+      pppCountryRestriction: "BR",
+    });
+  });
+
+  it("is allowed in a course the Buyer is already enrolled in, and leaves that Enrollment alone", () => {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Course");
+    seats.personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: null,
+    });
+    const before = seats.activeEnrollment(liam.id, course.id);
+
+    seats.buySeats({
+      buyerId: liam.id,
+      courseId: course.id,
+      seatCount: 2,
+      country: null,
+    });
+
+    const purchases = seats.buyerPurchases(liam.id);
+    expect(purchases).toHaveLength(2);
+    expect(purchases[1].seats.map((s) => s.state)).toEqual(["open", "open"]);
+    expect(seats.activeEnrollment(liam.id, course.id)).toEqual(before);
+  });
+});
+
+describe("Enrollment Eligibility with a Seat Code", () => {
+  function boughtSeats(
+    options: { pppEnabled?: boolean; country?: string | null } = {}
+  ) {
+    const buyer = scenario.person("Buyer");
+    const course = scenario.course("Course", 8000, {
+      pppEnabled: options.pppEnabled,
+    });
+    seats.buySeats({
+      buyerId: buyer.id,
+      courseId: course.id,
+      seatCount: 2,
+      country: options.country ?? null,
+    });
+    const [purchase] = seats.buyerPurchases(buyer.id);
+    return { buyer, course, codes: purchase.seats.map((s) => s.code) };
+  }
+
+  it("enrolls a Student on an open Seat", () => {
+    const { buyer, course, codes } = boughtSeats();
+    const ana = scenario.person("Ana");
+
+    const result = seats.enrollWithSeatCode({
+      studentId: ana.id,
+      seatCode: codes[0],
+      country: "US",
+    });
+
+    expect(result).toMatchObject({ ok: true, courseId: course.id });
+    expect(seats.buyerPurchases(buyer.id)[0].seats[0]).toMatchObject({
+      state: "taken",
+      holder: { id: ana.id, name: "Ana" },
+    });
+  });
+
+  it("refuses an unknown Seat Code", () => {
+    const ana = scenario.person("Ana");
+
+    expect(
+      seats.enrollmentEligibility({
+        studentId: ana.id,
+        seatCode: "NOPE",
+        country: null,
+      })
+    ).toEqual({ eligible: false, seat: null, refusal: "unknown-seat-code" });
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ana.id,
+        seatCode: "NOPE",
+        country: null,
+      })
+    ).toEqual({ ok: false, refusal: "unknown-seat-code" });
+  });
+
+  it("refuses a refunded Seat", () => {
+    const buyer = scenario.person("Buyer");
+    const admin = scenario.person("Admin");
+    const ana = scenario.person("Ana");
+    const course = scenario.course("Course");
+    const { seats: bought } = scenario.purchase(buyer, course, {
+      seatPrice: 7900,
+      at: "2026-11-01T00:00:00.000Z",
+    });
+    const request = scenario.requestRefund(
+      bought[0],
+      "No longer needed.",
+      "2026-11-02T00:00:00.000Z"
+    );
+    scenario.approveRefund(request, admin, 7900, "2026-11-03T00:00:00.000Z");
+
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ana.id,
+        seatCode: bought[0].code,
+        country: null,
+      })
+    ).toEqual({ ok: false, refusal: "refunded" });
+  });
+
+  it("refuses a Seat taken by another Student", () => {
+    const { codes } = boughtSeats();
+    const ana = scenario.person("Ana");
+    const ben = scenario.person("Ben");
+    seats.enrollWithSeatCode({
+      studentId: ana.id,
+      seatCode: codes[0],
+      country: null,
+    });
+
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ben.id,
+        seatCode: codes[0],
+        country: null,
+      })
+    ).toEqual({ ok: false, refusal: "used-by-another-student" });
+  });
+
+  it("refuses a Seat another Student has used, even after they unenrolled (Seat Reuse Limit 1)", () => {
+    const buyer = scenario.person("Buyer");
+    const ana = scenario.person("Ana");
+    const ben = scenario.person("Ben");
+    const course = scenario.course("Course");
+    const { seats: bought } = scenario.purchase(buyer, course, {
+      seatCount: 2,
+      seatPrice: 7900,
+      at: "2026-11-01T00:00:00.000Z",
+    });
+    const enrollment = scenario.enroll(
+      ana,
+      bought[0],
+      "2026-11-02T00:00:00.000Z"
+    );
+    scenario.unenroll(
+      enrollment,
+      UnenrollmentInitiator.Student,
+      "2026-11-03T00:00:00.000Z"
+    );
+
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ben.id,
+        seatCode: bought[0].code,
+        country: null,
+      })
+    ).toEqual({ ok: false, refusal: "used-by-another-student" });
+  });
+
+  it("lets a Student enroll again on their own Seat after unenrolling from it", () => {
+    const buyer = scenario.person("Buyer");
+    const ana = scenario.person("Ana");
+    const course = scenario.course("Course");
+    const { seats: bought } = scenario.purchase(buyer, course, {
+      seatPrice: 7900,
+      at: "2026-11-01T00:00:00.000Z",
+    });
+    const enrollment = scenario.enroll(
+      ana,
+      bought[0],
+      "2026-11-02T00:00:00.000Z"
+    );
+    scenario.unenroll(
+      enrollment,
+      UnenrollmentInitiator.Student,
+      "2026-11-03T00:00:00.000Z"
+    );
+
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ana.id,
+        seatCode: bought[0].code,
+        country: null,
+      }).ok
+    ).toBe(true);
+  });
+
+  it("refuses a Student already actively enrolled in the course, leaving the Seat open", () => {
+    const { buyer, course, codes } = boughtSeats();
+    const liam = scenario.person("Liam");
+    seats.personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: null,
+    });
+
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: liam.id,
+        seatCode: codes[0],
+        country: null,
+      })
+    ).toEqual({ ok: false, refusal: "already-enrolled" });
+    expect(seats.buyerPurchases(buyer.id)[0].seats[0].state).toBe("open");
+  });
+
+  it("refuses a Seat of a Purchase with a PPP Country Restriction from another country", () => {
+    const { codes } = boughtSeats({ pppEnabled: true, country: "IN" });
+    const ana = scenario.person("Ana");
+
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ana.id,
+        seatCode: codes[0],
+        country: "US",
+      })
+    ).toEqual({ ok: false, refusal: "country-mismatch", country: "IN" });
+    // An unknown country cannot be shown to be the country of purchase.
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ana.id,
+        seatCode: codes[0],
+        country: null,
+      })
+    ).toEqual({ ok: false, refusal: "country-mismatch", country: "IN" });
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ana.id,
+        seatCode: codes[0],
+        country: "IN",
+      }).ok
+    ).toBe(true);
+  });
+
+  it("accepts a full-price Seat from another country, because no PPP Discount was given", () => {
+    // Bought in a discounted country, but the course had no PPP, so the
+    // Purchase has no PPP Country Restriction (#8).
+    const { codes } = boughtSeats({ pppEnabled: false, country: "IN" });
+    const ana = scenario.person("Ana");
+
+    expect(
+      seats.enrollmentEligibility({
+        studentId: ana.id,
+        seatCode: codes[0],
+        country: "US",
+      })
+    ).toMatchObject({ eligible: true });
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ana.id,
+        seatCode: codes[0],
+        country: "US",
+      }).ok
+    ).toBe(true);
+  });
+});

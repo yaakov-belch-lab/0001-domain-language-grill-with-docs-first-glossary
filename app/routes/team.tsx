@@ -152,7 +152,7 @@ function CopyButton({ code }: { code: string }) {
   const [copied, setCopied] = useState(false);
 
   function handleCopy() {
-    const url = `${window.location.origin}/redeem/${code}`;
+    const url = `${window.location.origin}/seat/${code}`;
     navigator.clipboard.writeText(url).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
