@@ -55,6 +55,7 @@ import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
 import { COUNTRIES } from "~/lib/ppp";
 import { parseFormData, parseParams } from "~/lib/validation";
+import { createSeatsModule } from "~/lib/seats.server";
 
 const lessonParamsSchema = z.object({
   slug: z.string().min(1),
@@ -213,33 +214,6 @@ function getLessonProgressForCourse(userId: number, courseId: number) {
       )
     )
     .all();
-}
-
-function markLessonComplete(userId: number, lessonId: number) {
-  const existing = getLessonProgress(userId, lessonId);
-
-  if (existing) {
-    return db
-      .update(lessonProgress)
-      .set({
-        status: LessonProgressStatus.Completed,
-        completedAt: new Date().toISOString(),
-      })
-      .where(eq(lessonProgress.id, existing.id))
-      .returning()
-      .get();
-  }
-
-  return db
-    .insert(lessonProgress)
-    .values({
-      userId,
-      lessonId,
-      status: LessonProgressStatus.Completed,
-      completedAt: new Date().toISOString(),
-    })
-    .returning()
-    .get();
 }
 
 function markLessonInProgress(userId: number, lessonId: number) {
@@ -950,8 +924,15 @@ export async function action({ params, request }: Route.ActionArgs) {
     await requireContentAccess(request, course.id);
   }
 
+  // The seats module records the lesson, and Completion on the Enrollment
+  // once every lesson of the course is completed.
   if (intent === "mark-complete") {
-    markLessonComplete(currentUserId, lessonId);
+    const result = createSeatsModule().completeLesson({
+      studentId: currentUserId,
+      courseId: course.id,
+      lessonId,
+    });
+    if (!result.ok) throw data("Lesson not found", { status: 404 });
     return { success: true };
   }
 

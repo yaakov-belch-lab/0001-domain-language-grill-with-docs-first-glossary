@@ -184,8 +184,8 @@ export function seatScenario(db: TestDb) {
     },
 
     /**
-     * The Student's Completion of the course. Recording Completion is not in
-     * the app yet (#9), so tests set it directly.
+     * The Student's Completion of the course, set directly. The app records
+     * it through seats.completeLesson.
      */
     complete(enrollment: { id: number }, at: string) {
       db.update(schema.enrollments)

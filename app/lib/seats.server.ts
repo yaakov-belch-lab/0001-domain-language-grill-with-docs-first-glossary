@@ -177,6 +177,15 @@ export type Unenrolled = {
 
 export type UnenrollmentRefusal = { refusal: "not-enrolled" };
 
+export type LessonCompleted = {
+  ok: true;
+  // When the Student's active Enrollment recorded Completion, or null when
+  // there is none yet (lessons left, or no active Enrollment).
+  completedAt: string | null;
+};
+
+export type LessonCompletionRefusal = { refusal: "unknown-lesson" };
+
 export type MadePurchase = {
   purchaseId: number;
   seats: { id: number; code: string }[];
@@ -563,6 +572,16 @@ export function createSeatsModule(
       .run();
   }
 
+  function courseLessonIds(courseId: number): number[] {
+    return db
+      .select({ id: lessons.id })
+      .from(lessons)
+      .innerJoin(modules, eq(lessons.moduleId, modules.id))
+      .where(eq(modules.courseId, courseId))
+      .all()
+      .map((l) => l.id);
+  }
+
   /**
    * Seat Usage: what was watched and completed while enrolled on the Seat,
    * summed over every Enrollment in its Seat History.
@@ -571,13 +590,7 @@ export function createSeatsModule(
     const none = { watchedSeconds: 0, completion: 0 };
     const periods = seatEnrollments(history);
     if (periods.length === 0) return none;
-    const lessonIds = db
-      .select({ id: lessons.id })
-      .from(lessons)
-      .innerJoin(modules, eq(lessons.moduleId, modules.id))
-      .where(eq(modules.courseId, history.courseId))
-      .all()
-      .map((l) => l.id);
+    const lessonIds = courseLessonIds(history.courseId);
     if (lessonIds.length === 0) return none;
 
     // Whether a row of `userId` at time `at` falls inside an Enrollment.
@@ -835,6 +848,91 @@ export function createSeatsModule(
           enrollmentId: active.enrollmentId,
           seatId: active.seatId,
         } as const;
+      });
+    },
+
+    /**
+     * A person completes a lesson of a course. The lesson keeps the time it
+     * was first completed. When that leaves no lesson of the course
+     * uncompleted, the Student's active Enrollment records Completion, once.
+     * Completion is an achievement: it never ends or limits the Enrollment.
+     */
+    completeLesson(input: {
+      studentId: number;
+      courseId: number;
+      lessonId: number;
+    }): LessonCompleted | ({ ok: false } & LessonCompletionRefusal) {
+      return db.transaction((tx) => {
+        const lessonIds = courseLessonIds(input.courseId);
+        if (!lessonIds.includes(input.lessonId)) {
+          return { ok: false, refusal: "unknown-lesson" } as const;
+        }
+
+        const at = now();
+        const progress = tx
+          .select()
+          .from(lessonProgress)
+          .where(
+            and(
+              eq(lessonProgress.userId, input.studentId),
+              eq(lessonProgress.lessonId, input.lessonId)
+            )
+          )
+          .get();
+        if (!progress) {
+          tx.insert(lessonProgress)
+            .values({
+              userId: input.studentId,
+              lessonId: input.lessonId,
+              status: LessonProgressStatus.Completed,
+              completedAt: at,
+            })
+            .run();
+        } else if (progress.status !== LessonProgressStatus.Completed) {
+          tx.update(lessonProgress)
+            .set({ status: LessonProgressStatus.Completed, completedAt: at })
+            .where(eq(lessonProgress.id, progress.id))
+            .run();
+        }
+
+        const enrollment = tx
+          .select({ id: enrollments.id, completedAt: enrollments.completedAt })
+          .from(enrollments)
+          .where(
+            and(
+              eq(enrollments.userId, input.studentId),
+              eq(enrollments.courseId, input.courseId),
+              isNull(enrollments.endedAt)
+            )
+          )
+          .get();
+        if (!enrollment) return { ok: true, completedAt: null } as const;
+        if (enrollment.completedAt !== null) {
+          return { ok: true, completedAt: enrollment.completedAt } as const;
+        }
+
+        const completed = tx
+          .select({
+            count: sql<number>`count(distinct ${lessonProgress.lessonId})`,
+          })
+          .from(lessonProgress)
+          .where(
+            and(
+              eq(lessonProgress.userId, input.studentId),
+              eq(lessonProgress.status, LessonProgressStatus.Completed),
+              inArray(lessonProgress.lessonId, lessonIds)
+            )
+          )
+          .get();
+        if ((completed?.count ?? 0) < lessonIds.length) {
+          return { ok: true, completedAt: null } as const;
+        }
+
+        tx.update(enrollments)
+          .set({ completedAt: at })
+          .where(eq(enrollments.id, enrollment.id))
+          .run();
+        return { ok: true, completedAt: at } as const;
       });
     },
 

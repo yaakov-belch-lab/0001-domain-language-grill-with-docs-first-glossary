@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb, type TestDb } from "~/test/setup";
 import { seatScenario } from "~/test/seat-scenarios";
-import { UnenrollmentInitiator, UserRole, courses } from "~/db/schema";
+import {
+  UnenrollmentInitiator,
+  UserRole,
+  courses,
+  enrollments,
+  lessonProgress,
+} from "~/db/schema";
 import { createSeatsModule } from "./seats.server";
 
 const fixedClock = () => new Date("2026-11-09T12:00:00.000Z");
@@ -1117,6 +1123,137 @@ describe("Unenroll", () => {
 });
 
 describe("Completion", () => {
+  function enrolledStudent(lessonCount: number) {
+    const ana = scenario.person("Ana");
+    const course = scenario.course("Course");
+    const lessons = scenario.lessons(course, lessonCount);
+    const { seats: bought } = scenario.purchase(ana, course, {
+      seatPrice: 7900,
+      at: "2026-11-01T00:00:00.000Z",
+    });
+    const enrollment = scenario.enroll(
+      ana,
+      bought[0],
+      "2026-11-01T00:00:00.000Z"
+    );
+    return { ana, course, lessons, enrollment };
+  }
+
+  function completionOf(enrollment: { id: number }) {
+    return db
+      .select({ completedAt: enrollments.completedAt })
+      .from(enrollments)
+      .where(eq(enrollments.id, enrollment.id))
+      .get()?.completedAt;
+  }
+
+  it("is recorded when the Student completes the last lesson of the course", () => {
+    const { ana, course, lessons, enrollment } = enrolledStudent(2);
+
+    const first = seats.completeLesson({
+      studentId: ana.id,
+      courseId: course.id,
+      lessonId: lessons[0].id,
+    });
+    expect(first).toEqual({ ok: true, completedAt: null });
+    expect(completionOf(enrollment)).toBeNull();
+
+    const last = seats.completeLesson({
+      studentId: ana.id,
+      courseId: course.id,
+      lessonId: lessons[1].id,
+    });
+    expect(last).toEqual({ ok: true, completedAt: fixedClock().toISOString() });
+    expect(completionOf(enrollment)).toBe(fixedClock().toISOString());
+  });
+
+  it("is recorded once: completing a lesson again keeps the first time", () => {
+    const { ana, course, lessons, enrollment } = enrolledStudent(1);
+    const input = {
+      studentId: ana.id,
+      courseId: course.id,
+      lessonId: lessons[0].id,
+    };
+    seats.completeLesson(input);
+
+    const later = createSeatsModule({
+      db,
+      clock: () => new Date("2026-11-20T12:00:00.000Z"),
+    });
+    expect(later.completeLesson(input)).toEqual({
+      ok: true,
+      completedAt: fixedClock().toISOString(),
+    });
+    expect(completionOf(enrollment)).toBe(fixedClock().toISOString());
+    // The lesson keeps its first completion time too, so Seat Usage does not move.
+    const progress = db
+      .select()
+      .from(lessonProgress)
+      .where(eq(lessonProgress.userId, ana.id))
+      .all();
+    expect(progress).toEqual([
+      expect.objectContaining({ completedAt: fixedClock().toISOString() }),
+    ]);
+  });
+
+  it("counts lessons completed earlier", () => {
+    const { ana, course, lessons, enrollment } = enrolledStudent(2);
+    scenario.completeLesson(ana, lessons[0], "2026-11-02T00:00:00.000Z");
+
+    seats.completeLesson({
+      studentId: ana.id,
+      courseId: course.id,
+      lessonId: lessons[1].id,
+    });
+
+    expect(completionOf(enrollment)).toBe(fixedClock().toISOString());
+  });
+
+  it("is not recorded without an active Enrollment, though the lesson is", () => {
+    const { ana, course, lessons, enrollment } = enrolledStudent(1);
+    scenario.unenroll(
+      enrollment,
+      UnenrollmentInitiator.Student,
+      "2026-11-03T00:00:00.000Z"
+    );
+
+    expect(
+      seats.completeLesson({
+        studentId: ana.id,
+        courseId: course.id,
+        lessonId: lessons[0].id,
+      })
+    ).toEqual({ ok: true, completedAt: null });
+    expect(completionOf(enrollment)).toBeNull();
+  });
+
+  it("refuses a lesson of another course", () => {
+    const { ana, course } = enrolledStudent(1);
+    const other = scenario.course("Other Course");
+    const [foreign] = scenario.lessons(other, 1);
+
+    expect(
+      seats.completeLesson({
+        studentId: ana.id,
+        courseId: course.id,
+        lessonId: foreign.id,
+      })
+    ).toEqual({ ok: false, refusal: "unknown-lesson" });
+  });
+
+  it("keeps the Enrollment active once recorded", () => {
+    const { ana, course, lessons, enrollment } = enrolledStudent(1);
+    seats.completeLesson({
+      studentId: ana.id,
+      courseId: course.id,
+      lessonId: lessons[0].id,
+    });
+
+    expect(seats.activeEnrollment(ana.id, course.id)).toEqual(
+      expect.objectContaining({ enrollmentId: enrollment.id })
+    );
+  });
+
   it("never ends an Enrollment", () => {
     const ana = scenario.person("Ana");
     const course = scenario.course("Course");
