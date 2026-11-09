@@ -249,9 +249,10 @@ function getStudentRevenue(
 
   const studentIds = students.map((student) => student.userId);
 
+  // No range here: the money is credited to whoever is learning, whenever it
+  // was paid.
   const paidByUser = createSeatAnalytics().paidForStudents(studentIds, {
     instructorId,
-    since: rangeStart(range),
   });
 
   return students.map((student) => ({

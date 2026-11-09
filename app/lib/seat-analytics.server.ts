@@ -6,7 +6,10 @@ import {
   gte,
   inArray,
   isNull,
+  ne,
   not,
+  notExists,
+  or,
   sql,
 } from "drizzle-orm";
 import { db as appDb } from "~/db";
@@ -47,12 +50,12 @@ export function createSeatAnalytics(options: { db?: SeatsDatabase } = {}) {
      * What was paid for the Seats each Student has enrolled on, in cents and
      * unrounded: each Seat is worth its Purchase's Amount Paid divided by its
      * number of Seats. A Seat counts once per Student, however often they
-     * enrolled on it. Ignores `since`: the money is credited to whoever is
+     * enrolled on it. Takes no `since`: the money is credited to whoever is
      * learning, whenever it was paid.
      */
     paidForStudents(
       studentIds: number[],
-      scope: AnalyticsScope
+      scope: Pick<AnalyticsScope, "instructorId">
     ): Map<number, number> {
       if (studentIds.length === 0) return new Map();
 
@@ -104,9 +107,9 @@ export function createSeatAnalytics(options: { db?: SeatsDatabase } = {}) {
             eq(enrollments.userId, purchases.userId)
           )
         );
-      const personalPurchase = and(
-        eq(purchases.seatCount, 1),
-        exists(buyerEnrolledOnIt)
+      const notPersonalPurchase = or(
+        ne(purchases.seatCount, 1),
+        notExists(buyerEnrolledOnIt)
       );
 
       const activeEnrollment = db
@@ -141,7 +144,7 @@ export function createSeatAnalytics(options: { db?: SeatsDatabase } = {}) {
             scope.since === null
               ? undefined
               : gte(purchases.createdAt, scope.since),
-            not(personalPurchase!)
+            notPersonalPurchase
           )
         )
         .groupBy(purchases.userId)

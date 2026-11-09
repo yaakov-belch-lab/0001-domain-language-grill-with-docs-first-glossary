@@ -91,7 +91,7 @@ describe("what each Student's Seats were paid", () => {
 
     expect(
       analytics
-        .paidForStudents([liam.id], { instructorId: other.id, since: null })
+        .paidForStudents([liam.id], { instructorId: other.id })
         .get(liam.id)
     ).toBe(5000);
   });
