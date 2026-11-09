@@ -168,10 +168,11 @@ export function createSeatsModule(
           refundRequestId: r.id,
           reason: r.reason,
         });
+        const resolvedAt = r.resolvedAt ?? r.requestedAt;
         if (r.status === RefundRequestStatus.Approved) {
           events.push({
             type: "refund-approved",
-            at: r.resolvedAt ?? r.requestedAt,
+            at: resolvedAt,
             refundRequestId: r.id,
             amountRefunded: r.amountRefunded,
             resolvedByUserId: r.resolvedByUserId,
@@ -179,7 +180,7 @@ export function createSeatsModule(
         } else if (r.status === RefundRequestStatus.Declined) {
           events.push({
             type: "refund-declined",
-            at: r.resolvedAt ?? r.requestedAt,
+            at: resolvedAt,
             refundRequestId: r.id,
             resolvedByUserId: r.resolvedByUserId,
           });
@@ -249,8 +250,9 @@ export function createSeatsModule(
       );
       const holder = (h: SeatHistory): Holder | null => {
         const id = seatHolderId(h);
-        const name = id === null ? undefined : holderNames.get(id);
-        return id === null || name === undefined ? null : { id, name };
+        if (id === null) return null;
+        const name = holderNames.get(id);
+        return name === undefined ? null : { id, name };
       };
 
       return purchaseRows.map((purchase) => ({
@@ -271,7 +273,7 @@ export function createSeatsModule(
       studentId: number,
       courseId: number
     ): ActiveEnrollment | undefined {
-      const row = db
+      return db
         .select({
           enrollmentId: enrollments.id,
           seatId: enrollments.seatId,
@@ -286,7 +288,6 @@ export function createSeatsModule(
           )
         )
         .get();
-      return row;
     },
   };
 }
@@ -297,9 +298,11 @@ export function createSeatsModule(
 export function seatHolderId(history: SeatHistory): number | null {
   const active = new Map<number, number>();
   for (const event of history.events) {
-    if (event.type === "enrolled")
+    if (event.type === "enrolled") {
       active.set(event.enrollmentId, event.studentId);
-    if (event.type === "unenrolled") active.delete(event.enrollmentId);
+    } else if (event.type === "unenrolled") {
+      active.delete(event.enrollmentId);
+    }
   }
   const [holder] = active.values();
   return holder ?? null;
