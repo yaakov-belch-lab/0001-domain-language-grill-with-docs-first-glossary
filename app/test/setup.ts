@@ -1,6 +1,8 @@
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import fs from "fs";
+import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 import * as schema from "~/db/schema";
@@ -16,16 +18,57 @@ const migrationsFolder = path.resolve(__dirname, "../../drizzle");
  * Uses the same Drizzle migrations as the live database, ensuring
  * test and production schemas are always in sync.
  */
-export function createTestDb() {
+export function createTestDb(options: { stopBefore?: string } = {}) {
   const sqlite = new Database(":memory:");
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
 
   const testDb = drizzle(sqlite, { schema });
 
-  migrate(testDb, { migrationsFolder });
+  migrate(testDb, {
+    migrationsFolder: options.stopBefore
+      ? migrationsBefore(options.stopBefore)
+      : migrationsFolder,
+  });
 
   return testDb;
+}
+
+export type TestDb = ReturnType<typeof createTestDb>;
+
+/**
+ * Applies every migration not yet applied. Pairs with
+ * `createTestDb({ stopBefore })` to test a data migration against rows in the
+ * shape that came before it.
+ */
+export function applyRemainingMigrations(testDb: TestDb) {
+  migrate(testDb, { migrationsFolder });
+}
+
+// A copy of the migrations folder that ends just before the migration whose
+// tag starts with `tag`.
+function migrationsBefore(tag: string) {
+  const journalPath = path.join(migrationsFolder, "meta", "_journal.json");
+  const journal: { entries: { tag: string }[] } = JSON.parse(
+    fs.readFileSync(journalPath, "utf8")
+  );
+  const stop = journal.entries.findIndex((e) => e.tag.startsWith(tag));
+  if (stop === -1) throw new Error(`No migration tagged ${tag}`);
+
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "migrations-"));
+  fs.mkdirSync(path.join(folder, "meta"));
+  const entries = journal.entries.slice(0, stop);
+  fs.writeFileSync(
+    path.join(folder, "meta", "_journal.json"),
+    JSON.stringify({ ...journal, entries })
+  );
+  for (const entry of entries) {
+    fs.copyFileSync(
+      path.join(migrationsFolder, `${entry.tag}.sql`),
+      path.join(folder, `${entry.tag}.sql`)
+    );
+  }
+  return folder;
 }
 
 /**

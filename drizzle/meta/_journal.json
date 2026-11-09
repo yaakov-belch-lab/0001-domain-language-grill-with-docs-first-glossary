@@ -71,6 +71,20 @@
       "when": 1790083397130,
       "tag": "0009_clear_professor_monster",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794252916629,
+      "tag": "0010_optimal_madelyne_pryor",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1794252953103,
+      "tag": "0011_fill_seats",
+      "breakpoints": true
     }
   ]
 }

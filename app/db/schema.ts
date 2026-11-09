@@ -37,6 +37,21 @@ export enum RefundStatus {
   Declined = "declined",
 }
 
+export enum RefundRequestStatus {
+  Pending = "pending",
+  Approved = "approved",
+  Declined = "declined",
+}
+
+// Who caused an Unenrollment. See GLOSSARY.md.
+export enum UnenrollmentInitiator {
+  Student = "student",
+  Buyer = "buyer",
+  Admin = "admin",
+  CourseOwner = "course_owner",
+  System = "system",
+}
+
 export enum TeamMemberRole {
   Admin = "admin",
   Member = "member",
@@ -132,8 +147,20 @@ export const enrollments = sqliteTable(
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
     completedAt: text("completed_at"),
+    // The Seat this Enrollment is made on. Null only for Enrollments that no
+    // Purchase backs (free courses enrolled on before Seats existed).
+    seatId: integer("seat_id").references((): AnySQLiteColumn => seats.id),
+    // Null while the Enrollment is active. Set by an Unenrollment, together
+    // with its Initiator.
+    endedAt: text("ended_at"),
+    unenrollmentInitiator: text(
+      "unenrollment_initiator"
+    ).$type<UnenrollmentInitiator>(),
   },
-  (table) => [index("enrollments_course_idx").on(table.courseId)]
+  (table) => [
+    index("enrollments_course_idx").on(table.courseId),
+    index("enrollments_seat_idx").on(table.seatId),
+  ]
 );
 
 export const lessonProgress = sqliteTable(
@@ -222,6 +249,12 @@ export const purchases = sqliteTable(
       .references(() => courses.id),
     amountPaid: integer("amount_paid").notNull(),
     country: text("country"),
+    // Amount Paid is seatCount × seatPrice. The defaults exist only so the
+    // columns could be added to existing rows; the migration fills them.
+    seatCount: integer("seat_count").notNull().default(1),
+    seatPrice: integer("seat_price").notNull().default(0),
+    // The country of purchase, set only when a PPP Discount was given.
+    pppCountryRestriction: text("ppp_country_restriction"),
     createdAt: text("created_at")
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
@@ -251,6 +284,45 @@ export const refunds = sqliteTable(
     resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
   },
   (table) => [index("refunds_purchase_idx").on(table.purchaseId)]
+);
+
+export const seats = sqliteTable(
+  "seats",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    purchaseId: integer("purchase_id")
+      .notNull()
+      .references(() => purchases.id),
+    code: text("code").notNull().unique(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (table) => [index("seats_purchase_idx").on(table.purchaseId)]
+);
+
+export const refundRequests = sqliteTable(
+  "refund_requests",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    seatId: integer("seat_id")
+      .notNull()
+      .references(() => seats.id),
+    status: text("status")
+      .notNull()
+      .$type<RefundRequestStatus>()
+      .default(RefundRequestStatus.Pending),
+    // The Refund Reason, in the Buyer's own words.
+    reason: text("reason").notNull(),
+    // The Amount Refunded. Null unless the request was approved.
+    amountRefunded: integer("amount_refunded"),
+    requestedAt: text("requested_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    resolvedAt: text("resolved_at"),
+    resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
+  },
+  (table) => [index("refund_requests_seat_idx").on(table.seatId)]
 );
 
 export const teams = sqliteTable("teams", {

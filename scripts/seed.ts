@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
+import { and, eq, gte, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -77,8 +77,10 @@ async function seed() {
     DROP TABLE IF EXISTS team_members;
     DROP TABLE IF EXISTS teams;
     DROP TABLE IF EXISTS refunds;
-    DROP TABLE IF EXISTS purchases;
+    DROP TABLE IF EXISTS refund_requests;
     DROP TABLE IF EXISTS enrollments;
+    DROP TABLE IF EXISTS seats;
+    DROP TABLE IF EXISTS purchases;
     DROP TABLE IF EXISTS lessons;
     DROP TABLE IF EXISTS modules;
     DROP TABLE IF EXISTS courses;
@@ -222,15 +224,40 @@ async function seed() {
   // generated at the bottom of this file. Sign-up dates are spread across the
   // last twelve months, including the last few days.
   const cohortNames = [
-    "Ava Nakamura", "Noah Blackwood", "Isla Fernandes", "Ethan Okafor",
-    "Mia Lindqvist", "Lucas Moreau", "Zara Haddad", "Felix Andersen",
-    "Nina Kowalski", "Omar Rahman", "Chloe Beaumont", "Dmitri Volkov",
-    "Priya Raghavan", "Tomas Silva", "Hana Kim", "Gabriel Rossi",
-    "Amara Diallo", "Jonas Weber", "Lena Petrova", "Kwame Mensah",
-    "Sofia Ricci", "Aarav Shah", "Freya Nilsen", "Diego Castillo",
-    "Yuki Tanaka", "Rosa Delgado", "Idris Bello", "Clara Hoffmann",
-    "Mateo Alvarez", "Elif Demir", "Ruben Ortiz", "Anika Bose",
-    "Caleb Ncube", "Marta Novak",
+    "Ava Nakamura",
+    "Noah Blackwood",
+    "Isla Fernandes",
+    "Ethan Okafor",
+    "Mia Lindqvist",
+    "Lucas Moreau",
+    "Zara Haddad",
+    "Felix Andersen",
+    "Nina Kowalski",
+    "Omar Rahman",
+    "Chloe Beaumont",
+    "Dmitri Volkov",
+    "Priya Raghavan",
+    "Tomas Silva",
+    "Hana Kim",
+    "Gabriel Rossi",
+    "Amara Diallo",
+    "Jonas Weber",
+    "Lena Petrova",
+    "Kwame Mensah",
+    "Sofia Ricci",
+    "Aarav Shah",
+    "Freya Nilsen",
+    "Diego Castillo",
+    "Yuki Tanaka",
+    "Rosa Delgado",
+    "Idris Bello",
+    "Clara Hoffmann",
+    "Mateo Alvarez",
+    "Elif Demir",
+    "Ruben Ortiz",
+    "Anika Bose",
+    "Caleb Ncube",
+    "Marta Novak",
   ];
 
   const cohort = db
@@ -2058,7 +2085,9 @@ This course is still in draft while the cluster examples are rewritten against t
   markComplete(students[4].id, course1LessonIds[0], 12);
   markInProgress(students[4].id, course1LessonIds[1]);
 
-  console.log(`Created ${countRows(schema.lessonProgress)} lesson progress records.`);
+  console.log(
+    `Created ${countRows(schema.lessonProgress)} lesson progress records.`
+  );
 
   // ─── Quiz Attempts ───
 
@@ -2221,60 +2250,134 @@ This course is still in draft while the cluster examples are rewritten against t
   addWatchSession(students[3].id, course2LessonIds[0], 0, 300, 600, 22 * 24);
   addWatchSession(students[3].id, course2LessonIds[0], 300, 360, 600, 21 * 24);
 
-  // ─── Purchases ───
-  // Individual purchases for enrolled students
+  // ─── Purchases and Seats ───
+  // Every Purchase buys one or more Seats (ADR 0001). The Seats of the team
+  // purchases below keep their coupon codes as Seat Codes, as the migration
+  // does; every other Seat gets a generated Seat Code.
 
-  const [purchase1] = db
-    .insert(schema.purchases)
-    .values({
-      userId: students[0].id, // Emma — bought course 1 individually
-      courseId: course1.id,
-      amountPaid: 7900,
+  let seatCodeCounter = 0;
+
+  function recordPurchase(values: {
+    buyerId: number;
+    courseId: number;
+    seatPrice: number;
+    country: string | null;
+    // Only when a PPP Discount was given.
+    pppCountryRestriction: string | null;
+    createdAt: string;
+    seatCodes?: string[];
+  }) {
+    const seatCodes = values.seatCodes ?? [
+      `SEAT-${String(++seatCodeCounter).padStart(5, "0")}`,
+    ];
+    const [purchase] = db
+      .insert(schema.purchases)
+      .values({
+        userId: values.buyerId,
+        courseId: values.courseId,
+        seatCount: seatCodes.length,
+        seatPrice: values.seatPrice,
+        amountPaid: seatCodes.length * values.seatPrice,
+        country: values.country,
+        pppCountryRestriction: values.pppCountryRestriction,
+        createdAt: values.createdAt,
+      })
+      .returning()
+      .all();
+    const seats = db
+      .insert(schema.seats)
+      .values(
+        seatCodes.map((code) => ({
+          purchaseId: purchase.id,
+          code,
+          createdAt: values.createdAt,
+        }))
+      )
+      .returning()
+      .all();
+    return { purchase, seats };
+  }
+
+  // Puts a Student's active Enrollment in the Seat's course on that Seat.
+  function holdSeat(
+    student: { id: number },
+    seat: { id: number },
+    courseId: number
+  ) {
+    db.update(schema.enrollments)
+      .set({ seatId: seat.id })
+      .where(
+        and(
+          eq(schema.enrollments.userId, student.id),
+          eq(schema.enrollments.courseId, courseId),
+          isNull(schema.enrollments.seatId),
+          isNull(schema.enrollments.endedAt)
+        )
+      )
+      .run();
+  }
+
+  // Personal Purchases for the enrolled students above: one Seat each, held by
+  // the Buyer's own Enrollment.
+  const personalPurchases = [
+    // Emma — bought course 1
+    {
+      student: students[0],
+      course: course1,
+      seatPrice: 7900,
       country: "US",
-      createdAt: daysAgo(50),
-    })
-    .returning()
-    .all();
-
-  db.insert(schema.purchases)
-    .values({
-      userId: students[0].id, // Emma — bought course 2 individually
-      courseId: course2.id,
-      amountPaid: 5999,
+      ppp: false,
+      days: 50,
+    },
+    // Emma — bought course 2
+    {
+      student: students[0],
+      course: course2,
+      seatPrice: 5999,
       country: "US",
-      createdAt: daysAgo(40),
-    })
-    .run();
-
-  db.insert(schema.purchases)
-    .values({
-      userId: students[1].id, // James — bought course 1 with PPP discount (India)
-      courseId: course1.id,
-      amountPaid: 2500,
+      ppp: false,
+      days: 40,
+    },
+    // James — bought course 1 with a PPP Discount (India)
+    {
+      student: students[1],
+      course: course1,
+      seatPrice: 2500,
       country: "IN",
-      createdAt: daysAgo(45),
-    })
-    .run();
-
-  db.insert(schema.purchases)
-    .values({
-      userId: students[2].id, // Olivia — bought course 1 individually
-      courseId: course1.id,
-      amountPaid: 7900,
+      ppp: true,
+      days: 45,
+    },
+    // Olivia — bought course 1
+    {
+      student: students[2],
+      course: course1,
+      seatPrice: 7900,
       country: "US",
-      createdAt: daysAgo(35),
-    })
-    .run();
-
-  db.insert(schema.purchases)
-    .values({
-      userId: students[4].id, // Sophia — bought course 1 individually
-      courseId: course1.id,
-      amountPaid: 7900,
+      ppp: false,
+      days: 35,
+    },
+    // Sophia — bought course 1
+    {
+      student: students[4],
+      course: course1,
+      seatPrice: 7900,
       country: "US",
-      createdAt: daysAgo(15),
-    })
-    .run();
+      ppp: false,
+      days: 15,
+    },
+  ];
+
+  for (const p of personalPurchases) {
+    const { seats } = recordPurchase({
+      buyerId: p.student.id,
+      courseId: p.course.id,
+      seatPrice: p.seatPrice,
+      country: p.country,
+      pppCountryRestriction: p.ppp ? p.country : null,
+      createdAt: daysAgo(p.days),
+    });
+    holdSeat(p.student, seats[0], p.course.id);
+  }
 
   console.log(`Created ${countRows(schema.purchases)} individual purchases.`);
 
@@ -2296,19 +2399,6 @@ This course is still in draft while the cluster examples are rewritten against t
     })
     .run();
 
-  // Team purchase by Bossy McBossface for course 2 (5 seats)
-  const [teamPurchase] = db
-    .insert(schema.purchases)
-    .values({
-      userId: bossy.id,
-      courseId: course2.id,
-      amountPaid: 5999 * 5,
-      country: "US",
-      createdAt: daysAgo(30),
-    })
-    .returning()
-    .all();
-
   // Generate 5 coupons for the team purchase
   const couponCodes = [
     "TEAM-NODEJS-A1B2C3",
@@ -2317,6 +2407,17 @@ This course is still in draft while the cluster examples are rewritten against t
     "TEAM-NODEJS-J0K1L2",
     "TEAM-NODEJS-M3N4O5",
   ];
+
+  // Team purchase by Bossy McBossface for course 2: a Purchase of 5 Seats.
+  const { purchase: teamPurchase, seats: teamSeats } = recordPurchase({
+    buyerId: bossy.id,
+    courseId: course2.id,
+    seatPrice: 5999,
+    country: "US",
+    pppCountryRestriction: null,
+    createdAt: daysAgo(30),
+    seatCodes: couponCodes,
+  });
 
   const seededCoupons = db
     .insert(schema.coupons)
@@ -2351,6 +2452,14 @@ This course is still in draft while the cluster examples are rewritten against t
     })
     .where(eq(schema.coupons.id, seededCoupons[1].id))
     .run();
+
+  // Olivia and Liam hold the first two Seats; the other three are open.
+  holdSeat(
+    studentByEmail("olivia.martinez@student.dev"),
+    teamSeats[0],
+    course2.id
+  );
+  holdSeat(studentByEmail("liam@example.com"), teamSeats[1], course2.id);
 
   console.log(
     `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed, ${countRows(schema.coupons, isNull(schema.coupons.redeemedByUserId))} available).`
@@ -2459,21 +2568,21 @@ This course is still in draft while the cluster examples are rewritten against t
       ? Math.round((target.course.price * 0.5) / 100) * 100
       : target.course.price;
 
-    db.insert(schema.purchases)
-      .values({
-        userId: buyer.id,
-        courseId: target.course.id,
-        amountPaid,
-        country,
-        createdAt: daysAgo(purchasedDaysAgo),
-      })
-      .run();
+    const { seats } = recordPurchase({
+      buyerId: buyer.id,
+      courseId: target.course.id,
+      seatPrice: amountPaid,
+      country,
+      pppCountryRestriction: ppp ? country : null,
+      createdAt: daysAgo(purchasedDaysAgo),
+    });
     generatedPurchases++;
 
     db.insert(schema.enrollments)
       .values({
         userId: buyer.id,
         courseId: target.course.id,
+        seatId: seats[0].id,
         enrolledAt: daysAgo(purchasedDaysAgo),
       })
       .run();
@@ -2636,25 +2745,28 @@ This course is still in draft while the cluster examples are rewritten against t
       })
       .run();
 
-    const [purchase] = db
-      .insert(schema.purchases)
-      .values({
-        userId: teamAdmin.id,
-        courseId: course.id,
-        amountPaid: course.price * seats,
-        country: "US",
-        createdAt: daysAgo(purchasedDaysAgo),
-      })
-      .returning()
-      .all();
+    const codes = Array.from(
+      { length: seats },
+      (_, i) => `${codePrefix}-${String(i + 1).padStart(2, "0")}`
+    );
+
+    const { purchase, seats: purchaseSeats } = recordPurchase({
+      buyerId: teamAdmin.id,
+      courseId: course.id,
+      seatPrice: course.price,
+      country: "US",
+      pppCountryRestriction: null,
+      createdAt: daysAgo(purchasedDaysAgo),
+      seatCodes: codes,
+    });
 
     const teamCoupons = db
       .insert(schema.coupons)
       .values(
-        Array.from({ length: seats }, (_, i) => ({
+        codes.map((code) => ({
           teamId: team.id,
           courseId: course.id,
-          code: `${codePrefix}-${String(i + 1).padStart(2, "0")}`,
+          code,
           purchaseId: purchase.id,
           createdAt: daysAgo(purchasedDaysAgo),
         }))
@@ -2688,6 +2800,7 @@ This course is still in draft while the cluster examples are rewritten against t
         .values({
           userId: redeemer.id,
           courseId: course.id,
+          seatId: purchaseSeats[i].id,
           enrolledAt: daysAgo(redeemedDaysAgo),
         })
         .run();
@@ -2729,20 +2842,19 @@ This course is still in draft while the cluster examples are rewritten against t
   // today, so the fourteen-day refund window is still open whenever you seed.
 
   const liam = studentByEmail("liam@example.com");
-  db
-    .insert(schema.purchases)
-    .values({
-      userId: liam.id,
-      courseId: course1.id,
-      amountPaid: 7900,
-      country: null,
-      createdAt: daysAgo(9),
-    })
-    .run();
+  const { seats: liamSeats } = recordPurchase({
+    buyerId: liam.id,
+    courseId: course1.id,
+    seatPrice: 7900,
+    country: null,
+    pppCountryRestriction: null,
+    createdAt: daysAgo(9),
+  });
   db.insert(schema.enrollments)
     .values({
       userId: liam.id,
       courseId: course1.id,
+      seatId: liamSeats[0].id,
       enrolledAt: daysAgo(9),
     })
     .run();
@@ -2822,6 +2934,9 @@ This course is still in draft while the cluster examples are rewritten against t
   );
   console.log(
     `  Purchases: ${countRows(schema.purchases)} (${countRows(schema.purchases, gte(schema.purchases.createdAt, sevenDaysAgo))} in the last 7 days), spanning ${historyDays} days`
+  );
+  console.log(
+    `  Seats: ${countRows(schema.seats)} (${countRows(schema.enrollments, isNotNull(schema.enrollments.seatId))} taken)`
   );
   console.log(
     `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`
