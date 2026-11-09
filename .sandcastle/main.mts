@@ -84,7 +84,7 @@ const readyLabelFor = (branch: string) => {
 };
 const READY_LABEL = readyLabelFor(TARGET_BRANCH);
 
-const REPO = "Yaakov-Belch/cohort-005-project";
+const REPO = "yaakov-belch-lab/0001-domain-language-grill-with-docs-first-glossary";
 const REMOTE_URL = `git@github.com:${REPO}.git`;
 
 // sandbox.run() has no `output` option, so read the verdict from stdout. A
