@@ -172,6 +172,47 @@ describe("a Buyer's Purchases", () => {
       "taken",
     ]);
   });
+
+  it("carries each course's slug, so the page can link back to the course", () => {
+    const emma = scenario.person("Emma");
+    const course = scenario.course("Node");
+    scenario.purchase(emma, course, {
+      seatPrice: 5999,
+      at: "2026-10-01T00:00:00.000Z",
+    });
+
+    expect(seats.buyerPurchases(emma.id)[0].courseSlug).toBe(course.slug);
+  });
+});
+
+describe("whether a person is a Buyer", () => {
+  // The seats page is shown to everyone with at least one Purchase.
+  it("is true for a person with a Personal Purchase", () => {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("TypeScript");
+    const { seats: bought } = scenario.purchase(liam, course, {
+      seatPrice: 7900,
+      at: "2026-11-01T10:00:00.000Z",
+    });
+    scenario.enroll(liam, bought[0], "2026-11-01T10:00:00.000Z");
+
+    expect(seats.isBuyer(liam.id)).toBe(true);
+  });
+
+  it("is false for a Student enrolled only on someone else's Seat", () => {
+    const bossy = scenario.person("Bossy");
+    const olivia = scenario.person("Olivia");
+    const course = scenario.course("Node");
+    const { seats: bought } = scenario.purchase(bossy, course, {
+      seatCount: 2,
+      seatPrice: 5999,
+      at: "2026-10-01T00:00:00.000Z",
+    });
+    scenario.enroll(olivia, bought[0], "2026-10-02T00:00:00.000Z");
+
+    expect(seats.isBuyer(bossy.id)).toBe(true);
+    expect(seats.isBuyer(olivia.id)).toBe(false);
+  });
 });
 
 describe("a Seat's Seat History", () => {

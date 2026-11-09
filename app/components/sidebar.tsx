@@ -12,7 +12,7 @@ import {
   Shield,
   Tag,
   Users,
-  UsersRound,
+  Ticket,
   Moon,
   Sun,
   LogOut,
@@ -39,7 +39,7 @@ interface RecentCourse {
 interface SidebarProps {
   currentUser: CurrentUser | null;
   recentCourses?: RecentCourse[];
-  isTeamAdmin?: boolean;
+  isBuyer?: boolean;
 }
 
 interface NavItem {
@@ -109,7 +109,7 @@ function isVisible(item: NavItem, role: UserRole | null): boolean {
 export function Sidebar({
   currentUser,
   recentCourses = [],
-  isTeamAdmin = false,
+  isBuyer = false,
 }: SidebarProps) {
   const currentUserRole = currentUser?.role ?? null;
   const [isDark, setIsDark] = useState(false);
@@ -155,9 +155,9 @@ export function Sidebar({
               {item.label}
             </NavLink>
           ))}
-        {isTeamAdmin && (
+        {isBuyer && (
           <NavLink
-            to="/team"
+            to="/seats"
             className={({ isActive }) =>
               cn(
                 "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
@@ -167,8 +167,8 @@ export function Sidebar({
               )
             }
           >
-            <UsersRound className="size-4" />
-            Team
+            <Ticket className="size-4" />
+            My Seats
           </NavLink>
         )}
       </nav>

@@ -39,4 +39,4 @@ Bugs 1–10 are GitHub issues #1–#10. Bug 11 belongs to the migration to the m
 8. (#8, enrollment side fixed in #13) The PPP Country Restriction is inferred from the country of purchase, not from whether a PPP Discount was given. The check on Seat Codes applies it to full-price Purchases, and the check on content access skips Students enrolled through a Seat Code.
 9. (#9) Completion is never recorded by the app: `enrollments.completed_at` is set only by the seed.
 10. (#10) The UI names the same thing "Cancel my purchase", "Reversal" (email) and "Chargeback" (settings). The settings page shows the Amount Paid, while the form and email show a different amount.
-11. Team language (team, team admin, coupon, redeem, redemption link) contradicts the model in ADR 0001.
+11. (screens fixed in #13 and #14) Team language (team, team admin, coupon, redeem, redemption link) contradicts the model in ADR 0001. The Seat Code page and the Buyer's seats page use glossary words; the code (tables, the purchase page's `mode=team`) still does not.

@@ -247,7 +247,7 @@ export async function action({ params, request }: Route.ActionArgs) {
     country,
   });
   mirrorSeatsAsCoupons(currentUserId, course.id, purchase);
-  throw redirect(`/team`);
+  throw redirect(`/seats`);
 }
 
 export default function PurchaseConfirmation({

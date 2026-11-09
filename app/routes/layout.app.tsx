@@ -7,15 +7,13 @@ import { getCurrentUserId, getDevCountry } from "~/lib/session";
 import { getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { eq, and, or, sql, desc } from "drizzle-orm";
 import { db } from "~/db";
+import { createSeatsModule } from "~/lib/seats.server";
 import {
   users,
   courses,
   modules,
   lessons,
   lessonProgress,
-  teams,
-  teamMembers,
-  TeamMemberRole,
   LessonProgressStatus,
 } from "~/db/schema";
 
@@ -25,27 +23,6 @@ function getAllUsers() {
 
 function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
-}
-
-function getTeamForAdmin(userId: number) {
-  const membership = db
-    .select()
-    .from(teamMembers)
-    .where(
-      and(
-        eq(teamMembers.userId, userId),
-        eq(teamMembers.role, TeamMemberRole.Admin)
-      )
-    )
-    .get();
-
-  if (!membership) return undefined;
-
-  return db.select().from(teams).where(eq(teams.id, membership.teamId)).get();
-}
-
-function isTeamAdmin(userId: number) {
-  return !!getTeamForAdmin(userId);
 }
 
 function getCourseLessonIds(courseId: number): number[] {
@@ -185,7 +162,11 @@ export async function loader({ request }: Route.LoaderArgs) {
           course.courseId
         );
         const totalLessons = getTotalLessonCount(course.courseId);
-        const progress = calculateProgress(currentUserId, course.courseId, false);
+        const progress = calculateProgress(
+          currentUserId,
+          course.courseId,
+          false
+        );
         return {
           courseId: course.courseId,
           title: course.courseTitle,
@@ -212,7 +193,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     devCountry,
     countryTierInfo,
     countries: COUNTRIES,
-    isTeamAdmin: currentUserId ? isTeamAdmin(currentUserId) : false,
+    isBuyer: currentUserId ? createSeatsModule().isBuyer(currentUserId) : false,
   };
 }
 
@@ -224,7 +205,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     devCountry,
     countryTierInfo,
     countries,
-    isTeamAdmin: userIsTeamAdmin,
+    isBuyer,
   } = loaderData;
 
   return (
@@ -232,7 +213,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
       <Sidebar
         currentUser={currentUser}
         recentCourses={recentCourses}
-        isTeamAdmin={userIsTeamAdmin}
+        isBuyer={isBuyer}
       />
       <main className="flex-1 overflow-y-auto">
         <Outlet />

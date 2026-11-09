@@ -3,10 +3,9 @@ import { db } from "~/db";
 import { coupons, teamMembers, teams, TeamMemberRole } from "~/db/schema";
 import type { MadePurchase } from "~/lib/seats.server";
 
-// Temporary (spec #11, issue #13): the team page and the analytics page still
-// read teams and coupons. Until they move to the seats module, every Seat
-// bought through a Purchase of several Seats is also written as a coupon with
-// the same code, and every Enrollment with a Seat Code marks that coupon as
+// Temporary (spec #11, issue #13): the analytics page still reads teams and
+// coupons. Until it moves to the seats module, every Seat bought through a
+// Purchase of several Seats is also written as a coupon with the same code, and every Enrollment with a Seat Code marks that coupon as
 // redeemed. Delete this file when teams and coupons are dropped.
 
 /** Writes the Seats of a Purchase as coupons of the Buyer's team. */

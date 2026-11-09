@@ -78,6 +78,7 @@ export type BuyerPurchase = {
   id: number;
   courseId: number;
   courseTitle: string;
+  courseSlug: string;
   purchasedAt: string;
   seatCount: number;
   seatPrice: number;
@@ -468,6 +469,7 @@ export function createSeatsModule(
           id: purchases.id,
           courseId: purchases.courseId,
           courseTitle: courses.title,
+          courseSlug: courses.slug,
           purchasedAt: purchases.createdAt,
           seatCount: purchases.seatCount,
           seatPrice: purchases.seatPrice,
@@ -515,6 +517,16 @@ export function createSeatsModule(
             holder: holder(h),
           })),
       }));
+    },
+
+    /** Whether a person has made at least one Purchase. */
+    isBuyer(personId: number): boolean {
+      return !!db
+        .select({ id: purchases.id })
+        .from(purchases)
+        .where(eq(purchases.userId, personId))
+        .limit(1)
+        .get();
     },
 
     /** A person's active Enrollment in a course, and its Seat. */
