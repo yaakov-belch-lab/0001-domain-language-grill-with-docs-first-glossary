@@ -8,7 +8,6 @@ import { resolveCountry } from "~/lib/country.server";
 import { parseParams, parseFormData } from "~/lib/validation";
 import { countryName } from "~/lib/ppp";
 import { createSeatsModule, type EnrollmentRefusal } from "~/lib/seats.server";
-import { mirrorEnrollmentOnCoupon } from "~/lib/coupon-mirror.server";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Ticket, AlertCircle, CheckCircle2, Globe } from "lucide-react";
@@ -130,8 +129,6 @@ export async function action({ params, request }: Route.ActionArgs) {
   if (!result.ok) {
     return data({ error: refusalMessage(result).title }, { status: 400 });
   }
-
-  mirrorEnrollmentOnCoupon(code, currentUserId);
 
   const course = getCourseById(result.courseId);
   throw redirect(course ? `/courses/${course.slug}/welcome` : "/courses");

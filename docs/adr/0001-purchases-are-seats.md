@@ -10,11 +10,12 @@ We chose this over keeping "teams" as a separate system beside individual purcha
 
 ## Consequences
 
-The code does not follow this yet. Until it is migrated:
+The migration to this model is complete (spec #11):
 
-- `teams` and `team_members` (with role `admin`) exist only to group one Buyer's Purchases. They have no counterpart in the model.
-- The `coupons` table holds the Seats of Purchases with more than one Seat, and "redeem" means Enroll. Personal Purchases have no Seat row at all.
-- Refund Requests point at a Purchase, not at a Seat.
-- `enrollments` cannot be ended, so there is no Unenrollment and no Seat History of it.
+- Every Purchase has its rows in `seats`, each with a Seat Code. Personal Purchases have one Seat.
+- `enrollments` record their Seat, when they ended and the Initiator of the Unenrollment.
+- Refund Requests (`refund_requests`) point at a Seat, and are approved or declined.
+- One seats module makes every decision about a Seat from its Seat History.
+- The old `teams`, `team_members`, `coupons` and `refunds` tables were filled into the Seat model by migration 0011 and dropped by migration 0012. Their old URLs (`/team`, `/redeem/:code`) redirect to the seats page and the Seat Code page.
 
-See `docs/current-rules.md` for the rules as they work today, and for the bugs where the code contradicts this model.
+See `docs/current-rules.md` for the rules as they work today.

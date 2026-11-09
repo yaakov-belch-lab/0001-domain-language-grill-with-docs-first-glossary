@@ -43,10 +43,7 @@ import { data, isRouteErrorResponse } from "react-router";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { renderMarkdown } from "~/lib/markdown.server";
 import { resolveCountry } from "~/lib/country.server";
-import {
-  calculatePppPrice,
-  getCountryTierInfo,
-} from "~/lib/ppp";
+import { calculatePppPrice, getCountryTierInfo } from "~/lib/ppp";
 import { parseFormData } from "~/lib/validation";
 import {
   createSeatsModule,
@@ -301,7 +298,10 @@ function findRating(userId: number, courseId: number) {
     .select()
     .from(courseRatings)
     .where(
-      and(eq(courseRatings.userId, userId), eq(courseRatings.courseId, courseId))
+      and(
+        eq(courseRatings.userId, userId),
+        eq(courseRatings.courseId, courseId)
+      )
     )
     .get();
 }
@@ -588,9 +588,9 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     ? `/courses/${course.slug}/purchase`
     : `/signup?redirectTo=${encodeURIComponent(`/courses/${course.slug}/purchase`)}`;
 
-  const teamPurchaseLink = currentUserId
-    ? `/courses/${course.slug}/purchase?mode=team`
-    : `/signup?redirectTo=${encodeURIComponent(`/courses/${course.slug}/purchase?mode=team`)}`;
+  const seatsPurchaseLink = currentUserId
+    ? `/courses/${course.slug}/purchase?mode=seats`
+    : `/signup?redirectTo=${encodeURIComponent(`/courses/${course.slug}/purchase?mode=seats`)}`;
 
   const priceDisplay = (
     <div className="mb-3 text-center">
@@ -616,8 +616,8 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
         <TabsTrigger value="self" className="flex-1 text-xs">
           Buy for Myself
         </TabsTrigger>
-        <TabsTrigger value="team" className="flex-1 text-xs">
-          Buy for Team
+        <TabsTrigger value="seats" className="flex-1 text-xs">
+          Buy Seats
         </TabsTrigger>
       </TabsList>
       <TabsContentNoShift>
@@ -629,11 +629,11 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
             </Button>
           </Link>
         </TabsContent>
-        <TabsContent value="team" forceMount>
+        <TabsContent value="seats" forceMount>
           {priceDisplay}
-          <Link to={teamPurchaseLink}>
+          <Link to={seatsPurchaseLink}>
             <Button size="lg" variant="outline" className="w-full">
-              Buy for Your Team
+              Buy Seats for Others
             </Button>
           </Link>
         </TabsContent>
@@ -786,7 +786,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
                         </Link>
                       ) : null;
                     })()}
-                  <Link to={teamPurchaseLink}>
+                  <Link to={seatsPurchaseLink}>
                     <Button variant="outline" className="w-full">
                       <Users className="mr-2 size-4" />
                       Buy More Seats
@@ -970,8 +970,8 @@ function Unenroll({ slug }: { slug: string }) {
       <p className="mb-2 text-sm font-medium">Unenroll from this course?</p>
       <p className="mb-3 text-xs text-muted-foreground">
         You will lose access to its lessons and quizzes. Unenrolling does not
-        give you any money back. You can enroll again later with the Seat
-        Code of the same Seat, as long as it has not been refunded.
+        give you any money back. You can enroll again later with the Seat Code
+        of the same Seat, as long as it has not been refunded.
       </p>
       <fetcher.Form
         method="post"

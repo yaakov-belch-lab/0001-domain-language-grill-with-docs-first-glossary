@@ -11,7 +11,6 @@ import {
   CourseStatus,
   LessonProgressStatus,
   QuestionType,
-  TeamMemberRole,
 } from "../app/db/schema";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -73,10 +72,6 @@ async function seed() {
     DROP TABLE IF EXISTS quiz_questions;
     DROP TABLE IF EXISTS quizzes;
     DROP TABLE IF EXISTS lesson_progress;
-    DROP TABLE IF EXISTS coupons;
-    DROP TABLE IF EXISTS team_members;
-    DROP TABLE IF EXISTS teams;
-    DROP TABLE IF EXISTS refunds;
     DROP TABLE IF EXISTS refund_requests;
     DROP TABLE IF EXISTS enrollments;
     DROP TABLE IF EXISTS seats;
@@ -111,7 +106,7 @@ async function seed() {
   // cohort generated further down, which supplies volume. Anything that picks a
   // student out of a list does it by email, never by array position — see
   // studentByEmail — so appending or inserting students never silently
-  // re-points a coupon redemption at someone else.
+  // re-points a Seat at someone else.
 
   const [admin] = db
     .insert(schema.users)
@@ -2251,9 +2246,8 @@ This course is still in draft while the cluster examples are rewritten against t
   addWatchSession(students[3].id, course2LessonIds[0], 300, 360, 600, 21 * 24);
 
   // ─── Purchases and Seats ───
-  // Every Purchase buys one or more Seats (ADR 0001). The Seats of the team
-  // purchases below keep their coupon codes as Seat Codes, as the migration
-  // does; every other Seat gets a generated Seat Code.
+  // Every Purchase buys one or more Seats (ADR 0001). The Purchases of several
+  // Seats below name their Seat Codes; every other Seat gets a generated one.
 
   let seatCodeCounter = 0;
 
@@ -2381,88 +2375,41 @@ This course is still in draft while the cluster examples are rewritten against t
 
   console.log(`Created ${countRows(schema.purchases)} individual purchases.`);
 
-  // ─── Teams, Team Members, and Coupons ───
-  // Bossy McBossface bought 5 team seats for course 2; Olivia and Liam redeemed coupons
+  // ─── Purchases of several Seats ───
+  // Bossy McBossface bought 5 Seats for course 2; Olivia and Liam hold two.
 
-  const [team1] = db
-    .insert(schema.teams)
-    .values({ createdAt: daysAgo(30) })
-    .returning()
-    .all();
-
-  db.insert(schema.teamMembers)
-    .values({
-      teamId: team1.id,
-      userId: bossy.id,
-      role: TeamMemberRole.Admin,
-      createdAt: daysAgo(30),
-    })
-    .run();
-
-  // Generate 5 coupons for the team purchase
-  const couponCodes = [
-    "TEAM-NODEJS-A1B2C3",
-    "TEAM-NODEJS-D4E5F6",
-    "TEAM-NODEJS-G7H8I9",
-    "TEAM-NODEJS-J0K1L2",
-    "TEAM-NODEJS-M3N4O5",
+  const bossySeatCodes = [
+    "NODEJS-A1B2C3",
+    "NODEJS-D4E5F6",
+    "NODEJS-G7H8I9",
+    "NODEJS-J0K1L2",
+    "NODEJS-M3N4O5",
   ];
 
-  // Team purchase by Bossy McBossface for course 2: a Purchase of 5 Seats.
-  const { purchase: teamPurchase, seats: teamSeats } = recordPurchase({
+  const { seats: bossySeats } = recordPurchase({
     buyerId: bossy.id,
     courseId: course2.id,
     seatPrice: 5999,
     country: "US",
     pppCountryRestriction: null,
     createdAt: daysAgo(30),
-    seatCodes: couponCodes,
+    seatCodes: bossySeatCodes,
   });
 
-  const seededCoupons = db
-    .insert(schema.coupons)
-    .values(
-      couponCodes.map((code) => ({
-        teamId: team1.id,
-        courseId: course2.id,
-        code,
-        purchaseId: teamPurchase.id,
-        createdAt: daysAgo(30),
-      }))
-    )
-    .returning()
-    .all();
-
-  // Redeem 2 of the 5 coupons. Redeemers are named by email, not by position in
-  // the students array — position would silently re-point these redemptions at
-  // different people the moment a student is inserted rather than appended.
-  // Both already have an enrolment for course 2 from the enrolments section.
-  db.update(schema.coupons)
-    .set({
-      redeemedByUserId: studentByEmail("olivia.martinez@student.dev").id,
-      redeemedAt: daysAgo(30),
-    })
-    .where(eq(schema.coupons.id, seededCoupons[0].id))
-    .run();
-
-  db.update(schema.coupons)
-    .set({
-      redeemedByUserId: studentByEmail("liam@example.com").id,
-      redeemedAt: daysAgo(25),
-    })
-    .where(eq(schema.coupons.id, seededCoupons[1].id))
-    .run();
-
+  // Holders are named by email, not by position in the students array —
+  // position would silently re-point these Seats at different people the
+  // moment a student is inserted rather than appended. Both already have an
+  // Enrollment for course 2 from the Enrollments section.
   // Olivia and Liam hold the first two Seats; the other three are open.
   holdSeat(
     studentByEmail("olivia.martinez@student.dev"),
-    teamSeats[0],
+    bossySeats[0],
     course2.id
   );
-  holdSeat(studentByEmail("liam@example.com"), teamSeats[1], course2.id);
+  holdSeat(studentByEmail("liam@example.com"), bossySeats[1], course2.id);
 
   console.log(
-    `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed, ${countRows(schema.coupons, isNull(schema.coupons.redeemedByUserId))} available).`
+    `Created 1 Purchase of ${bossySeats.length} Seats for Bossy McBossface (2 taken).`
   );
 
   // ─── Generated history ───
@@ -2715,43 +2662,28 @@ This course is still in draft while the cluster examples are rewritten against t
     `Created ${generatedPurchases} generated purchases, ${generatedEnrollments} enrolments and ${generatedProgressRows} lesson progress rows.`
   );
 
-  // ─── Further team purchases ───
-  // Two more seat purchases so team revenue is not a single row, in mixed
-  // redemption states: one team most of the way through its seats, one that has
-  // bought and redeemed nothing yet.
+  // ─── Further Purchases of several Seats ───
+  // Two more, so revenue from Seats bought for others is not a single row, in
+  // mixed states: one Buyer has handed out most of their Seats, the other has
+  // bought Seats and handed out none yet.
 
-  function createTeamPurchase(
-    adminEmail: string,
+  function buySeatsFor(
+    buyerEmail: string,
     course: typeof course1,
-    seats: number,
+    seatCount: number,
     codePrefix: string,
     purchasedDaysAgo: number,
-    redeemerEmails: string[]
+    holderEmails: string[]
   ) {
-    const teamAdmin = studentByEmail(adminEmail);
-
-    const [team] = db
-      .insert(schema.teams)
-      .values({ createdAt: daysAgo(purchasedDaysAgo) })
-      .returning()
-      .all();
-
-    db.insert(schema.teamMembers)
-      .values({
-        teamId: team.id,
-        userId: teamAdmin.id,
-        role: TeamMemberRole.Admin,
-        createdAt: daysAgo(purchasedDaysAgo),
-      })
-      .run();
+    const buyer = studentByEmail(buyerEmail);
 
     const codes = Array.from(
-      { length: seats },
+      { length: seatCount },
       (_, i) => `${codePrefix}-${String(i + 1).padStart(2, "0")}`
     );
 
-    const { purchase, seats: purchaseSeats } = recordPurchase({
-      buyerId: teamAdmin.id,
+    const { seats } = recordPurchase({
+      buyerId: buyer.id,
       courseId: course.id,
       seatPrice: course.price,
       country: "US",
@@ -2760,85 +2692,35 @@ This course is still in draft while the cluster examples are rewritten against t
       seatCodes: codes,
     });
 
-    const teamCoupons = db
-      .insert(schema.coupons)
-      .values(
-        codes.map((code) => ({
-          teamId: team.id,
-          courseId: course.id,
-          code,
-          purchaseId: purchase.id,
-          createdAt: daysAgo(purchasedDaysAgo),
-        }))
-      )
-      .returning()
-      .all();
-
-    // Redeemers named by email, for the reason given at the first team above.
-    redeemerEmails.forEach((email, i) => {
-      const redeemer = studentByEmail(email);
-      const redeemedDaysAgo = Math.max(0, purchasedDaysAgo - (i + 1) * 2);
-
-      db.update(schema.coupons)
-        .set({
-          redeemedByUserId: redeemer.id,
-          redeemedAt: daysAgo(redeemedDaysAgo),
-        })
-        .where(eq(schema.coupons.id, teamCoupons[i].id))
-        .run();
-
-      db.insert(schema.teamMembers)
-        .values({
-          teamId: team.id,
-          userId: redeemer.id,
-          role: TeamMemberRole.Member,
-          createdAt: daysAgo(redeemedDaysAgo),
-        })
-        .run();
-
+    // Holders named by email, for the reason given at Bossy's Purchase above.
+    holderEmails.forEach((email, i) => {
       db.insert(schema.enrollments)
         .values({
-          userId: redeemer.id,
+          userId: studentByEmail(email).id,
           courseId: course.id,
-          seatId: purchaseSeats[i].id,
-          enrolledAt: daysAgo(redeemedDaysAgo),
+          seatId: seats[i].id,
+          enrolledAt: daysAgo(Math.max(0, purchasedDaysAgo - (i + 1) * 2)),
         })
         .run();
     });
-
-    return { team, purchase, coupons: teamCoupons };
   }
 
-  // Eight seats on TypeScript, six redeemed.
-  createTeamPurchase(
-    "ava.nakamura@student.dev",
-    course1,
-    8,
-    "TEAM-TS-NAKAMURA",
-    120,
-    [
-      "noah.blackwood@student.dev",
-      "isla.fernandes@student.dev",
-      "ethan.okafor@student.dev",
-      "mia.lindqvist@student.dev",
-      "lucas.moreau@student.dev",
-      "zara.haddad@student.dev",
-    ]
-  );
+  // Eight Seats on TypeScript, six taken.
+  buySeatsFor("ava.nakamura@student.dev", course1, 8, "TS-NAKAMURA", 120, [
+    "noah.blackwood@student.dev",
+    "isla.fernandes@student.dev",
+    "ethan.okafor@student.dev",
+    "mia.lindqvist@student.dev",
+    "lucas.moreau@student.dev",
+    "zara.haddad@student.dev",
+  ]);
 
-  // Four seats on Design Systems, bought during launch week, none redeemed yet.
-  createTeamPurchase(
-    "marta.novak@student.dev",
-    course3,
-    4,
-    "TEAM-DS-NOVAK",
-    4,
-    []
-  );
+  // Four Seats on Design Systems, bought during launch week, all open.
+  buySeatsFor("marta.novak@student.dev", course3, 4, "DS-NOVAK", 4, []);
 
   // ─── Liam's Purchase ───
-  // One learner part-way through a recent purchase, with no request raised, so
-  // the course page offers "Cancel my purchase". The dates count back from
+  // One Student part-way through a recent Personal Purchase, with no Refund
+  // Request made, so the course page offers the Cancellation. The dates count back from
   // today, so the fourteen-day refund window is still open whenever you seed.
 
   const liam = studentByEmail("liam@example.com");
@@ -2937,9 +2819,6 @@ This course is still in draft while the cluster examples are rewritten against t
   );
   console.log(
     `  Seats: ${countRows(schema.seats)} (${countRows(schema.enrollments, isNotNull(schema.enrollments.seatId))} taken)`
-  );
-  console.log(
-    `  Teams: ${countRows(schema.teams)}, coupons: ${countRows(schema.coupons)} (${countRows(schema.coupons, isNotNull(schema.coupons.redeemedByUserId))} redeemed)`
   );
 }
 

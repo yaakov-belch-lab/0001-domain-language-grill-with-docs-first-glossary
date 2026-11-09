@@ -8,7 +8,7 @@
 7. Learning Streaks — track consecutive days of learning activity, GitHub-style contribution calendar
 8. Student Analytics — personal dashboard showing time spent, quiz trends, completion velocity
 9. Funnel Analysis — visualize where students drop off in a course, identify problem lessons
-10. Revenue Reports — breakdown by course, PPP tier, team vs individual, with CSV export
+10. Revenue Reports — breakdown by course, PPP tier, Personal Purchases vs Seats bought for others, with CSV export
 11. Lesson Search — full-text search across all lesson content within a course
 
 ## Medium (half day)
@@ -27,7 +27,7 @@
 
 ## Hard (1-2 days)
 
-23. In-App Notifications — bell icon with unread count for announcements, quiz results, coupon activity
+23. In-App Notifications — bell icon with unread count for announcements, quiz results, Seat Code activity
 24. Webhook Integrations — fire HTTP callbacks on enrollment, purchase, and completion events for external tools
 25. Student Profiles — public profiles showing completed courses, badges, and bio
 26. Discussion Forum per Lesson — threaded Q&A on each lesson, instructors can pin answers

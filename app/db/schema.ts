@@ -31,12 +31,6 @@ export enum QuestionType {
   TrueFalse = "true_false",
 }
 
-export enum RefundStatus {
-  Requested = "requested",
-  Approved = "approved",
-  Declined = "declined",
-}
-
 export enum RefundRequestStatus {
   Pending = "pending",
   Approved = "approved",
@@ -50,11 +44,6 @@ export enum UnenrollmentInitiator {
   Admin = "admin",
   CourseOwner = "course_owner",
   System = "system",
-}
-
-export enum TeamMemberRole {
-  Admin = "admin",
-  Member = "member",
 }
 
 // ─── Tables ───
@@ -262,30 +251,6 @@ export const purchases = sqliteTable(
   (table) => [index("purchases_course_idx").on(table.courseId)]
 );
 
-export const refunds = sqliteTable(
-  "refunds",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    purchaseId: integer("purchase_id")
-      .notNull()
-      .references(() => purchases.id),
-    status: text("status")
-      .notNull()
-      .$type<RefundStatus>()
-      .default(RefundStatus.Requested),
-    // The learner's own words, in the box on the course page.
-    reason: text("reason").notNull(),
-    // Null until someone approves — a declined request refunds nothing.
-    amountRefunded: integer("amount_refunded"),
-    requestedAt: text("requested_at")
-      .notNull()
-      .$defaultFn(() => new Date().toISOString()),
-    resolvedAt: text("resolved_at"),
-    resolvedByUserId: integer("resolved_by_user_id").references(() => users.id),
-  },
-  (table) => [index("refunds_purchase_idx").on(table.purchaseId)]
-);
-
 export const seats = sqliteTable(
   "seats",
   {
@@ -324,46 +289,6 @@ export const refundRequests = sqliteTable(
   },
   (table) => [index("refund_requests_seat_idx").on(table.seatId)]
 );
-
-export const teams = sqliteTable("teams", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  createdAt: text("created_at")
-    .notNull()
-    .$defaultFn(() => new Date().toISOString()),
-});
-
-export const teamMembers = sqliteTable("team_members", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  teamId: integer("team_id")
-    .notNull()
-    .references(() => teams.id),
-  userId: integer("user_id")
-    .notNull()
-    .references(() => users.id),
-  role: text("role").notNull().$type<TeamMemberRole>(),
-  createdAt: text("created_at")
-    .notNull()
-    .$defaultFn(() => new Date().toISOString()),
-});
-
-export const coupons = sqliteTable("coupons", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  teamId: integer("team_id")
-    .notNull()
-    .references(() => teams.id),
-  courseId: integer("course_id")
-    .notNull()
-    .references(() => courses.id),
-  code: text("code").notNull().unique(),
-  purchaseId: integer("purchase_id")
-    .notNull()
-    .references(() => purchases.id),
-  redeemedByUserId: integer("redeemed_by_user_id").references(() => users.id),
-  redeemedAt: text("redeemed_at"),
-  createdAt: text("created_at")
-    .notNull()
-    .$defaultFn(() => new Date().toISOString()),
-});
 
 export const courseRatings = sqliteTable(
   "course_ratings",

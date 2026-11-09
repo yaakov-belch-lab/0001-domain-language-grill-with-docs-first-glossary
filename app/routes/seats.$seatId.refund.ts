@@ -95,7 +95,7 @@ function buildRefundRequestEmail(input: {
       "",
       "Your Refund Request is Pending until it is approved or declined. You keep access to the course until then, and we will email you again when it is decided.",
       "",
-      "— The Cadence team",
+      "— Cadence",
     ].join("\n"),
   };
 }

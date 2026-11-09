@@ -243,7 +243,7 @@ export default function Seats({ loaderData }: Route.ComponentProps) {
                     </Link>
                   </div>
                   <Link
-                    to={`/courses/${purchase.courseSlug}/purchase?mode=team`}
+                    to={`/courses/${purchase.courseSlug}/purchase?mode=seats`}
                   >
                     <Button variant="outline" size="sm">
                       Buy more Seats

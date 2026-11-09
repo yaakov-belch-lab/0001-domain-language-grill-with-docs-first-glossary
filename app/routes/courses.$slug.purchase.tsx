@@ -16,7 +16,6 @@ import {
 } from "~/db/schema";
 import { eq, or, sql, and, isNull } from "drizzle-orm";
 import { createSeatsModule } from "~/lib/seats.server";
-import { mirrorSeatsAsCoupons } from "~/lib/coupon-mirror.server";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import {
@@ -118,9 +117,7 @@ function getEnrollmentCountForCourse(courseId: number) {
   const result = db
     .select({ count: sql<number>`count(*)` })
     .from(enrollments)
-    .where(
-      and(eq(enrollments.courseId, courseId), isNull(enrollments.endedAt))
-    )
+    .where(and(eq(enrollments.courseId, courseId), isNull(enrollments.endedAt)))
     .get();
 
   return result?.count ?? 0;
@@ -133,7 +130,7 @@ const purchaseParamsSchema = z.object({
 const purchaseActionSchema = z.discriminatedUnion("intent", [
   z.object({ intent: z.literal("confirm-purchase") }),
   z.object({
-    intent: z.literal("confirm-team-purchase"),
+    intent: z.literal("confirm-seats-purchase"),
     quantity: z.coerce.number().int().min(1),
   }),
 ]);
@@ -170,7 +167,7 @@ export async function loader({ params, request, url }: Route.LoaderArgs) {
   const seats = createSeatsModule();
   const enrolled = !!seats.activeEnrollment(currentUserId, course.id);
 
-  if (enrolled && mode !== "team") {
+  if (enrolled && mode !== "seats") {
     throw redirect(`/courses/${slug}?already_enrolled=1`);
   }
 
@@ -242,13 +239,12 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   // A Purchase of several Seats: the Buyer is not enrolled.
-  const purchase = seats.buySeats({
+  seats.buySeats({
     buyerId: currentUserId,
     courseId: course.id,
     seatCount: parsed.data.quantity,
     country,
   });
-  mirrorSeatsAsCoupons(currentUserId, course.id, purchase);
   throw redirect(`/seats`);
 }
 
@@ -269,7 +265,7 @@ export default function PurchaseConfirmation({
   const isSubmitting = fetcher.state !== "idle";
   const [searchParams] = useSearchParams();
   const defaultMode =
-    isEnrolled || searchParams.get("mode") === "team" ? "team" : "self";
+    isEnrolled || searchParams.get("mode") === "seats" ? "seats" : "self";
   const [quantity, setQuantity] = useState(1);
 
   useEffect(() => {
@@ -279,7 +275,7 @@ export default function PurchaseConfirmation({
   }, [fetcher.state, fetcher.data]);
 
   const isDiscounted = pppPrice < course.price;
-  const teamTotal = pppPrice * quantity;
+  const amountPaid = pppPrice * quantity;
 
   return (
     <div className="mx-auto max-w-3xl p-6 lg:p-8">
@@ -360,8 +356,8 @@ export default function PurchaseConfirmation({
                   <TabsTrigger value="self" className="flex-1">
                     Buy for Myself
                   </TabsTrigger>
-                  <TabsTrigger value="team" className="flex-1">
-                    Buy for Your Team
+                  <TabsTrigger value="seats" className="flex-1">
+                    Buy Seats for Others
                   </TabsTrigger>
                 </TabsList>
               )}
@@ -419,8 +415,8 @@ export default function PurchaseConfirmation({
                   </TabsContent>
                 )}
 
-                {/* Buy for Your Team */}
-                <TabsContent value="team" forceMount>
+                {/* Buy Seats for Others */}
+                <TabsContent value="seats" forceMount>
                   <div className="space-y-6">
                     {/* Quantity selector */}
                     <div className="flex items-center gap-4">
@@ -456,7 +452,7 @@ export default function PurchaseConfirmation({
                         {quantity === 1 ? "seat" : "seats"}
                       </div>
                       <div className="text-3xl font-bold">
-                        {formatPrice(teamTotal)}
+                        {formatPrice(amountPaid)}
                       </div>
                     </div>
 
@@ -474,7 +470,7 @@ export default function PurchaseConfirmation({
                         <input
                           type="hidden"
                           name="intent"
-                          value="confirm-team-purchase"
+                          value="confirm-seats-purchase"
                         />
                         <input type="hidden" name="quantity" value={quantity} />
                         <Button size="lg" disabled={isSubmitting}>

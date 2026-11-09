@@ -7,8 +7,9 @@ import {
 import { createSeatsModule } from "./seats.server";
 
 // 0010 adds the Seat tables and columns; 0011 fills them from teams, coupons
-// and refunds. Rows are written in the shape they had before 0010, then both
-// run and the result is read back through the seats module.
+// and refunds; 0012 drops those old tables. Rows are written in the shape they
+// had before 0010, then all three run and the result is read back through the
+// seats module.
 const FIRST_SEATS_MIGRATION = "0010";
 
 const T = "2026-10-01T10:00:00.000Z";
