@@ -669,21 +669,19 @@ export function createSeatsModule(
     return refundEligibilityOf(history, input.buyerId);
   }
 
-  // Whether a person is an Admin, or null for an unknown person.
-  function decider(personId: number): { isAdmin: boolean } | null {
+  function isAdmin(personId: number): boolean {
     const person = db
       .select({ role: users.role })
       .from(users)
       .where(eq(users.id, personId))
       .get();
-    if (!person) return null;
-    return { isAdmin: person.role === UserRole.Admin };
+    return person?.role === UserRole.Admin;
   }
 
   // Who may decide Refund Requests for a course: an Admin for any course, the
   // Course Owner for their own.
   function mayDecideFor(personId: number, courseId: number): boolean {
-    if (decider(personId)?.isAdmin) return true;
+    if (isAdmin(personId)) return true;
     const course = db
       .select({ ownerId: courses.instructorId })
       .from(courses)
@@ -1076,7 +1074,7 @@ export function createSeatsModule(
      * Course Owner of at least one course.
      */
     mayDecideRefunds(personId: number): boolean {
-      if (decider(personId)?.isAdmin) return true;
+      if (isAdmin(personId)) return true;
       return !!db
         .select({ id: courses.id })
         .from(courses)
@@ -1090,8 +1088,7 @@ export function createSeatsModule(
      * them for an Admin, those for their own courses for a Course Owner.
      */
     refundDecisions(deciderId: number): RefundDecision[] {
-      const who = decider(deciderId);
-      if (!who) return [];
+      const deciderIsAdmin = isAdmin(deciderId);
       const rows = db
         .select({
           id: refundRequests.id,
@@ -1110,7 +1107,7 @@ export function createSeatsModule(
         .where(
           and(
             eq(refundRequests.status, RefundRequestStatus.Pending),
-            who.isAdmin ? undefined : eq(courses.instructorId, deciderId)
+            deciderIsAdmin ? undefined : eq(courses.instructorId, deciderId)
           )
         )
         .orderBy(asc(refundRequests.requestedAt), asc(refundRequests.id))
