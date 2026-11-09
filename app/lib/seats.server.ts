@@ -2,11 +2,13 @@ import crypto from "crypto";
 import {
   and,
   asc,
+  desc,
   eq,
   gte,
   inArray,
   isNull,
   lte,
+  ne,
   or,
   sql,
   type SQL,
@@ -27,6 +29,7 @@ import {
   RefundRequestStatus,
   seats,
   UnenrollmentInitiator,
+  UserRole,
   users,
   videoWatchEvents,
 } from "~/db/schema";
@@ -100,6 +103,8 @@ export type BuyerSeat = {
   // Eligibility refuses one.
   refundOffer: RefundOffer | null;
   refundPending: boolean;
+  // What its Refund Approval gave back, or null while it is not refunded.
+  amountRefunded: number | null;
 };
 
 export type BuyerPurchase = {
@@ -230,6 +235,48 @@ export type PendingRefundRequest = {
   reason: string;
   requestedAt: string;
 };
+
+/** A Pending Refund Request as the person deciding it sees it. */
+export type RefundDecision = {
+  id: number;
+  seatId: number;
+  courseId: number;
+  courseTitle: string;
+  courseSlug: string;
+  buyer: Holder;
+  // The Student whose Enrollment on the Seat is active, if any.
+  holder: Holder | null;
+  refundAmount: number;
+  reason: string;
+  requestedAt: string;
+  seatUsage: SeatUsage;
+};
+
+/** A Buyer's Refund Request that has been approved or declined. */
+export type DecidedRefundRequest = {
+  id: number;
+  seatId: number;
+  courseTitle: string;
+  courseSlug: string;
+  status: RefundRequestStatus.Approved | RefundRequestStatus.Declined;
+  amountRefunded: number | null;
+  decidedAt: string;
+};
+
+export type RefundDecisionRefusal =
+  | { refusal: "unknown-refund-request" }
+  | { refusal: "not-decider" }
+  | { refusal: "not-pending" };
+
+export type RefundDeclined = {
+  ok: true;
+  refundRequestId: number;
+  seatId: number;
+  courseId: number;
+  buyerId: number;
+};
+
+export type RefundApproved = RefundDeclined & { amountRefunded: number };
 
 export function createSeatsModule(
   deps: { db?: SeatsDatabase; clock?: Clock } = {}
@@ -622,6 +669,78 @@ export function createSeatsModule(
     return refundEligibilityOf(history, input.buyerId);
   }
 
+  // Whether a person is an Admin, or null for an unknown person.
+  function decider(personId: number): { isAdmin: boolean } | null {
+    const person = db
+      .select({ role: users.role })
+      .from(users)
+      .where(eq(users.id, personId))
+      .get();
+    if (!person) return null;
+    return { isAdmin: person.role === UserRole.Admin };
+  }
+
+  // Who may decide Refund Requests for a course: an Admin for any course, the
+  // Course Owner for their own.
+  function mayDecideFor(personId: number, courseId: number): boolean {
+    if (decider(personId)?.isAdmin) return true;
+    const course = db
+      .select({ ownerId: courses.instructorId })
+      .from(courses)
+      .where(eq(courses.id, courseId))
+      .get();
+    return course?.ownerId === personId;
+  }
+
+  // A Refund Approval or Refund Decline. Both are refused unless the person
+  // may decide for the Seat's course and the request is still Pending.
+  function decideRefund<T>(
+    input: { deciderId: number; refundRequestId: number },
+    record: (tx: SeatsDatabase, history: SeatHistory, at: string) => T
+  ): T | ({ ok: false } & RefundDecisionRefusal) {
+    return db.transaction((tx) => {
+      const request = tx
+        .select({ seatId: refundRequests.seatId })
+        .from(refundRequests)
+        .where(eq(refundRequests.id, input.refundRequestId))
+        .get();
+      const history = request && seatHistories([request.seatId])[0];
+      if (!history) {
+        return { ok: false, refusal: "unknown-refund-request" } as const;
+      }
+      if (!mayDecideFor(input.deciderId, history.courseId)) {
+        return { ok: false, refusal: "not-decider" } as const;
+      }
+      if (pendingRefundRequestId(history) !== input.refundRequestId) {
+        return { ok: false, refusal: "not-pending" } as const;
+      }
+      return record(tx, history, now());
+    });
+  }
+
+  function resolve(
+    tx: SeatsDatabase,
+    input: { deciderId: number; refundRequestId: number },
+    status: RefundRequestStatus.Approved | RefundRequestStatus.Declined,
+    amountRefunded: number | null,
+    at: string
+  ) {
+    tx.update(refundRequests)
+      .set({
+        status,
+        amountRefunded,
+        resolvedAt: at,
+        resolvedByUserId: input.deciderId,
+      })
+      .where(
+        and(
+          eq(refundRequests.id, input.refundRequestId),
+          eq(refundRequests.status, RefundRequestStatus.Pending)
+        )
+      )
+      .run();
+  }
+
   return {
     clock,
 
@@ -758,6 +877,60 @@ export function createSeatsModule(
       });
     },
 
+    /**
+     * An Admin or the Course Owner approves a Pending Refund Request. The
+     * Amount Refunded is the Refund Amount, the Seat becomes refunded, and any
+     * active Enrollment on it ends with the system as Initiator. No money
+     * moves: there is no payment provider, so this only records the refund.
+     */
+    approveRefund(input: {
+      deciderId: number;
+      refundRequestId: number;
+    }): RefundApproved | ({ ok: false } & RefundDecisionRefusal) {
+      return decideRefund(input, (tx, history, at) => {
+        const { refundAmount } = refundOffer(history);
+        const active = tx
+          .select({ id: enrollments.id })
+          .from(enrollments)
+          .where(
+            and(
+              eq(enrollments.seatId, history.seatId),
+              isNull(enrollments.endedAt)
+            )
+          )
+          .all();
+        for (const enrollment of active) {
+          endEnrollment(tx, enrollment.id, UnenrollmentInitiator.System, at);
+        }
+        resolve(tx, input, RefundRequestStatus.Approved, refundAmount, at);
+        return {
+          ok: true,
+          refundRequestId: input.refundRequestId,
+          seatId: history.seatId,
+          courseId: history.courseId,
+          buyerId: history.buyerId,
+          amountRefunded: refundAmount,
+        } as const;
+      });
+    },
+
+    /** An Admin or the Course Owner declines a Pending Refund Request. Nothing else changes. */
+    declineRefund(input: {
+      deciderId: number;
+      refundRequestId: number;
+    }): RefundDeclined | ({ ok: false } & RefundDecisionRefusal) {
+      return decideRefund(input, (tx, history, at) => {
+        resolve(tx, input, RefundRequestStatus.Declined, null, at);
+        return {
+          ok: true,
+          refundRequestId: input.refundRequestId,
+          seatId: history.seatId,
+          courseId: history.courseId,
+          buyerId: history.buyerId,
+        } as const;
+      });
+    },
+
     // ─── Questions ───
 
     /** The Seat Price and PPP Country Restriction a Purchase would get now. */
@@ -836,6 +1009,7 @@ export function createSeatsModule(
             })),
             refundOffer: offerOf(refundEligibilityOf(h, buyerId)),
             refundPending: pendingRefundRequestId(h) !== null,
+            amountRefunded: amountRefunded(h),
           })),
       }));
     },
@@ -895,6 +1069,117 @@ export function createSeatsModule(
         )
         .orderBy(asc(refundRequests.requestedAt), asc(refundRequests.id))
         .all();
+    },
+
+    /**
+     * Whether a person may see the refund decisions page: an Admin, or the
+     * Course Owner of at least one course.
+     */
+    mayDecideRefunds(personId: number): boolean {
+      if (decider(personId)?.isAdmin) return true;
+      return !!db
+        .select({ id: courses.id })
+        .from(courses)
+        .where(eq(courses.instructorId, personId))
+        .limit(1)
+        .get();
+    },
+
+    /**
+     * The Pending Refund Requests a person may decide, oldest first: all of
+     * them for an Admin, those for their own courses for a Course Owner.
+     */
+    refundDecisions(deciderId: number): RefundDecision[] {
+      const who = decider(deciderId);
+      if (!who) return [];
+      const rows = db
+        .select({
+          id: refundRequests.id,
+          seatId: refundRequests.seatId,
+          courseId: courses.id,
+          courseTitle: courses.title,
+          courseSlug: courses.slug,
+          buyerId: purchases.userId,
+          reason: refundRequests.reason,
+          requestedAt: refundRequests.requestedAt,
+        })
+        .from(refundRequests)
+        .innerJoin(seats, eq(refundRequests.seatId, seats.id))
+        .innerJoin(purchases, eq(seats.purchaseId, purchases.id))
+        .innerJoin(courses, eq(purchases.courseId, courses.id))
+        .where(
+          and(
+            eq(refundRequests.status, RefundRequestStatus.Pending),
+            who.isAdmin ? undefined : eq(courses.instructorId, deciderId)
+          )
+        )
+        .orderBy(asc(refundRequests.requestedAt), asc(refundRequests.id))
+        .all();
+      if (rows.length === 0) return [];
+
+      const histories = new Map(
+        seatHistories(rows.map((r) => r.seatId)).map((h) => [h.seatId, h])
+      );
+      const holderIds = new Map(
+        [...histories.values()].map((h) => [h.seatId, seatHolderId(h)])
+      );
+      const peopleNames = names([
+        ...new Set([
+          ...rows.map((r) => r.buyerId),
+          ...[...holderIds.values()].filter((id) => id !== null),
+        ]),
+      ]);
+      const person = (id: number): Holder => ({
+        id,
+        name: peopleNames.get(id) ?? "Unknown",
+      });
+
+      return rows.flatMap(({ buyerId, ...row }) => {
+        const history = histories.get(row.seatId);
+        if (!history) return [];
+        const holderId = holderIds.get(row.seatId) ?? null;
+        return [
+          {
+            ...row,
+            buyer: person(buyerId),
+            holder: holderId === null ? null : person(holderId),
+            refundAmount: refundOffer(history).refundAmount,
+            seatUsage: seatUsage(history),
+          },
+        ];
+      });
+    },
+
+    /** A Buyer's decided Refund Requests, most recently decided first. */
+    decidedRefundRequests(buyerId: number): DecidedRefundRequest[] {
+      return db
+        .select({
+          id: refundRequests.id,
+          seatId: refundRequests.seatId,
+          courseTitle: courses.title,
+          courseSlug: courses.slug,
+          status: refundRequests.status,
+          amountRefunded: refundRequests.amountRefunded,
+          resolvedAt: refundRequests.resolvedAt,
+          requestedAt: refundRequests.requestedAt,
+        })
+        .from(refundRequests)
+        .innerJoin(seats, eq(refundRequests.seatId, seats.id))
+        .innerJoin(purchases, eq(seats.purchaseId, purchases.id))
+        .innerJoin(courses, eq(purchases.courseId, courses.id))
+        .where(
+          and(
+            eq(purchases.userId, buyerId),
+            ne(refundRequests.status, RefundRequestStatus.Pending)
+          )
+        )
+        .orderBy(desc(refundRequests.resolvedAt), desc(refundRequests.id))
+        .all()
+        .flatMap(({ status, resolvedAt, requestedAt, ...row }) =>
+          status === RefundRequestStatus.Pending
+            ? []
+            : [{ ...row, status, decidedAt: resolvedAt ?? requestedAt }]
+        );
     },
 
     /** Whether a person has made at least one Purchase. */
@@ -964,6 +1249,14 @@ export function seatState(history: SeatHistory): SeatState {
     return "refunded";
   }
   return seatHolderId(history) === null ? "open" : "taken";
+}
+
+/** What the Seat's Refund Approval gave back, or null while it is not refunded. */
+export function amountRefunded(history: SeatHistory): number | null {
+  const approval = history.events.find((e) => e.type === "refund-approved");
+  return approval?.type === "refund-approved"
+    ? approval.amountRefunded
+    : null;
 }
 
 /** The Pending Refund Request for the Seat, if any. */

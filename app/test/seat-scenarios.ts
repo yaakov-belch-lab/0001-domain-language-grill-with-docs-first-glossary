@@ -10,10 +10,9 @@ import type { TestDb } from "./setup";
 /**
  * Arranges Seat Histories for tests, in glossary language.
  *
- * The seats module has no acts yet, so these write the records a Seat History
- * is made of directly. As each act lands (make a Purchase, Enroll, Unenroll,
- * Refund Request, Refund Approval, Refund Decline), tests should call the act
- * instead.
+ * These write the records a Seat History is made of directly, so a test can
+ * arrange histories the acts would refuse (a Purchase in the past, a request
+ * outside the rules). To test an act itself, call the seats module.
  */
 export function seatScenario(db: TestDb) {
   let codes = 0;

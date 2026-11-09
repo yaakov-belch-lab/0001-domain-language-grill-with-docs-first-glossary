@@ -10,7 +10,7 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { Textarea } from "~/components/ui/textarea";
-import { UserRole, users } from "~/db/schema";
+import { RefundRequestStatus, UserRole, users } from "~/db/schema";
 import { createSeatsModule } from "~/lib/seats.server";
 import { AlertTriangle } from "lucide-react";
 import { data, isRouteErrorResponse, Link } from "react-router";
@@ -49,8 +49,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     throw data("User not found.", { status: 404 });
   }
 
-  const pendingRefundRequests =
-    createSeatsModule().pendingRefundRequests(currentUserId);
+  const seats = createSeatsModule();
+  const pendingRefundRequests = seats.pendingRefundRequests(currentUserId);
+  const decidedRefundRequests = seats.decidedRefundRequests(currentUserId);
 
   return {
     user: {
@@ -61,6 +62,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       role: currentUser.role,
     },
     pendingRefundRequests,
+    decidedRefundRequests,
   };
 }
 
@@ -99,7 +101,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Settings({ loaderData }: Route.ComponentProps) {
-  const { user, pendingRefundRequests } = loaderData;
+  const { user, pendingRefundRequests, decidedRefundRequests } = loaderData;
   const fetcher = useFetcher();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -216,6 +218,39 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
                   {new Date(refundRequest.requestedAt).toLocaleDateString()}
                 </p>
                 <p className="mt-2 text-sm">{refundRequest.reason}</p>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {decidedRefundRequests.length > 0 && (
+        <Card className="mt-8 max-w-md">
+          <CardHeader>
+            <h2 className="text-lg font-semibold">Decided Refund Requests</h2>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {decidedRefundRequests.map((refundRequest) => (
+              <div key={refundRequest.id} className="rounded-md border p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <Link
+                    to={`/courses/${refundRequest.courseSlug}`}
+                    className="font-medium hover:underline"
+                  >
+                    {refundRequest.courseTitle}
+                  </Link>
+                  <span className="shrink-0 rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium text-muted-foreground">
+                    {refundRequest.status === RefundRequestStatus.Approved
+                      ? "Approved"
+                      : "Declined"}
+                  </span>
+                </div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {refundRequest.amountRefunded !== null &&
+                    `Amount Refunded ${formatPrice(refundRequest.amountRefunded)} · `}
+                  decided{" "}
+                  {new Date(refundRequest.decidedAt).toLocaleDateString()}
+                </p>
               </div>
             ))}
           </CardContent>

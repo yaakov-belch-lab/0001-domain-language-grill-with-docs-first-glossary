@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb, type TestDb } from "~/test/setup";
 import { seatScenario } from "~/test/seat-scenarios";
-import { UnenrollmentInitiator, courses } from "~/db/schema";
+import { UnenrollmentInitiator, UserRole, courses } from "~/db/schema";
 import { createSeatsModule } from "./seats.server";
 
 const fixedClock = () => new Date("2026-11-09T12:00:00.000Z");
@@ -69,6 +69,7 @@ describe("a Buyer's Purchases", () => {
         // Bought in October: the Refund Window has closed.
         refundOffer: null,
         refundPending: false,
+        amountRefunded: null,
       },
       {
         id: bought[1].id,
@@ -85,6 +86,7 @@ describe("a Buyer's Purchases", () => {
         ],
         refundOffer: null,
         refundPending: false,
+        amountRefunded: null,
       },
       {
         id: bought[2].id,
@@ -95,6 +97,7 @@ describe("a Buyer's Purchases", () => {
         // Bought in October: the Refund Window has closed.
         refundOffer: null,
         refundPending: false,
+        amountRefunded: null,
       },
     ]);
   });
@@ -1760,5 +1763,352 @@ describe("Refund Requests on the seats page", () => {
         refundPending: false,
       },
     ]);
+  });
+});
+
+describe("deciding a Refund Request", () => {
+  // Bossy buys 2 Seats of Kim's course on 1 November; Ana enrolls on one.
+  function bossysPurchase() {
+    const kim = scenario.person("Kim", UserRole.Instructor);
+    const admin = scenario.person("Admin", UserRole.Admin);
+    const bossy = scenario.person("Bossy");
+    const ana = scenario.person("Ana");
+    const course = scenario.course("Course", 7900, { owner: kim });
+    const bought = seatsAt(local(1)).buySeats({
+      buyerId: bossy.id,
+      courseId: course.id,
+      seatCount: 2,
+      country: null,
+    });
+    const [taken, open] = bought.seats;
+    return { kim, admin, bossy, ana, course, taken, open };
+  }
+
+  // The Buyer makes a Refund Request on 2 November.
+  function pendingRequest(buyerId: number, seatId: number) {
+    const result = seatsAt(local(2)).requestRefund({
+      buyerId,
+      seatId,
+      reason: REASON,
+    });
+    if (!result.ok) throw new Error(`Refund Request refused: ${result.refusal}`);
+    return result.refundRequestId;
+  }
+
+  describe("Refund Approval", () => {
+    it("of a taken Seat records the Amount Refunded, who and when, ends the Enrollment with the system as Initiator, and access is lost", () => {
+      const liam = scenario.person("Liam");
+      const admin = scenario.person("Admin", UserRole.Admin);
+      const course = scenario.course("Course", 7900);
+      const bought = seatsAt(local(1)).personalPurchase({
+        buyerId: liam.id,
+        courseId: course.id,
+        country: null,
+      });
+      if (!bought.ok) throw new Error("Purchase refused");
+      const refundRequestId = pendingRequest(liam.id, bought.seatId);
+
+      const result = seatsAt(local(3)).approveRefund({
+        deciderId: admin.id,
+        refundRequestId,
+      });
+
+      expect(result).toEqual({
+        ok: true,
+        refundRequestId,
+        seatId: bought.seatId,
+        courseId: course.id,
+        buyerId: liam.id,
+        amountRefunded: 7900,
+      });
+      const history = seats.seatHistory(bought.seatId);
+      expect(history?.events.slice(-2)).toEqual([
+        {
+          type: "unenrolled",
+          at: local(3).toISOString(),
+          enrollmentId: bought.enrollmentId,
+          studentId: liam.id,
+          initiator: UnenrollmentInitiator.System,
+        },
+        {
+          type: "refund-approved",
+          at: local(3).toISOString(),
+          refundRequestId,
+          amountRefunded: 7900,
+          resolvedByUserId: admin.id,
+        },
+      ]);
+      // The Student loses access to the course.
+      expect(seats.activeEnrollment(liam.id, course.id)).toBeUndefined();
+      expect(seats.buyerPurchases(liam.id)[0].seats[0]).toMatchObject({
+        state: "refunded",
+        holder: null,
+        amountRefunded: 7900,
+        refundOffer: null,
+        refundPending: false,
+      });
+    });
+
+    it("of an open Seat makes it refunded, with its Seat Price as the Amount Refunded", () => {
+      const { kim, bossy, open } = bossysPurchase();
+      const refundRequestId = pendingRequest(bossy.id, open.id);
+
+      expect(
+        seatsAt(local(3)).approveRefund({ deciderId: kim.id, refundRequestId })
+      ).toMatchObject({ ok: true, amountRefunded: 7900 });
+
+      const seat = seats
+        .buyerPurchases(bossy.id)[0]
+        .seats.find((s) => s.id === open.id);
+      expect(seat).toMatchObject({
+        state: "refunded",
+        amountRefunded: 7900,
+        enrollments: [],
+      });
+    });
+
+    it("refunds the Seat Price paid, not today's Course Price", () => {
+      const { admin, bossy, course, open } = bossysPurchase();
+      const refundRequestId = pendingRequest(bossy.id, open.id);
+      db.update(courses).set({ price: 9900 }).where(eq(courses.id, course.id)).run();
+
+      expect(
+        seatsAt(local(3)).approveRefund({ deciderId: admin.id, refundRequestId })
+      ).toMatchObject({ ok: true, amountRefunded: 7900 });
+    });
+
+    it("makes the Seat Code refused, and the Seat never eligible for another Refund Request", () => {
+      const { admin, bossy, ana, open } = bossysPurchase();
+      const refundRequestId = pendingRequest(bossy.id, open.id);
+      seatsAt(local(3)).approveRefund({ deciderId: admin.id, refundRequestId });
+
+      const later = seatsAt(local(4));
+      expect(
+        later.enrollWithSeatCode({
+          studentId: ana.id,
+          seatCode: open.code,
+          country: null,
+        })
+      ).toEqual({ ok: false, refusal: "refunded" });
+      expect(
+        later.requestRefund({ buyerId: bossy.id, seatId: open.id, reason: REASON })
+      ).toEqual({ ok: false, refusal: "refunded" });
+    });
+
+    it("leaves the other Seats of the Purchase alone", () => {
+      const { admin, bossy, ana, taken, open } = bossysPurchase();
+      seatsAt(local(1)).enrollWithSeatCode({
+        studentId: ana.id,
+        seatCode: taken.code,
+        country: null,
+      });
+      const refundRequestId = pendingRequest(bossy.id, open.id);
+      seatsAt(local(3)).approveRefund({ deciderId: admin.id, refundRequestId });
+
+      const states = seats
+        .buyerPurchases(bossy.id)[0]
+        .seats.map((s) => [s.id, s.state]);
+      expect(states).toEqual([
+        [taken.id, "taken"],
+        [open.id, "refunded"],
+      ]);
+    });
+  });
+
+  describe("Refund Decline", () => {
+    it("records who declined it and when, and changes nothing else", () => {
+      const liam = scenario.person("Liam");
+      const admin = scenario.person("Admin", UserRole.Admin);
+      const course = scenario.course("Course", 7900);
+      const bought = seatsAt(local(1)).personalPurchase({
+        buyerId: liam.id,
+        courseId: course.id,
+        country: null,
+      });
+      if (!bought.ok) throw new Error("Purchase refused");
+      const refundRequestId = pendingRequest(liam.id, bought.seatId);
+
+      expect(
+        seatsAt(local(3)).declineRefund({ deciderId: admin.id, refundRequestId })
+      ).toEqual({
+        ok: true,
+        refundRequestId,
+        seatId: bought.seatId,
+        courseId: course.id,
+        buyerId: liam.id,
+      });
+      expect(seats.seatHistory(bought.seatId)?.events.at(-1)).toEqual({
+        type: "refund-declined",
+        at: local(3).toISOString(),
+        refundRequestId,
+        resolvedByUserId: admin.id,
+      });
+      // The Student keeps access and the Seat stays taken.
+      expect(seats.activeEnrollment(liam.id, course.id)).toBeDefined();
+      expect(seats.buyerPurchases(liam.id)[0].seats[0]).toMatchObject({
+        state: "taken",
+        amountRefunded: null,
+        refundPending: false,
+      });
+      expect(seats.pendingRefundRequests(liam.id)).toEqual([]);
+    });
+  });
+
+  describe("who may decide", () => {
+    it("lets an Admin decide a Refund Request for any course", () => {
+      const { admin, bossy, open } = bossysPurchase();
+      const refundRequestId = pendingRequest(bossy.id, open.id);
+
+      expect(seats.mayDecideRefunds(admin.id)).toBe(true);
+      expect(
+        seatsAt(local(3)).declineRefund({ deciderId: admin.id, refundRequestId })
+      ).toMatchObject({ ok: true });
+    });
+
+    it("lets the Course Owner decide a Refund Request for their own course", () => {
+      const { kim, bossy, open } = bossysPurchase();
+      const refundRequestId = pendingRequest(bossy.id, open.id);
+
+      expect(seats.mayDecideRefunds(kim.id)).toBe(true);
+      expect(
+        seatsAt(local(3)).approveRefund({ deciderId: kim.id, refundRequestId })
+      ).toMatchObject({ ok: true });
+    });
+
+    it("refuses another Instructor, the Buyer and a Student, and changes nothing", () => {
+      const { bossy, ana, open } = bossysPurchase();
+      const otherInstructor = scenario.person("Ola", UserRole.Instructor);
+      scenario.course("Ola's course", 5000, { owner: otherInstructor });
+      const refundRequestId = pendingRequest(bossy.id, open.id);
+      const now = seatsAt(local(3));
+
+      for (const person of [otherInstructor, bossy, ana]) {
+        expect(
+          now.approveRefund({ deciderId: person.id, refundRequestId })
+        ).toEqual({ ok: false, refusal: "not-decider" });
+        expect(
+          now.declineRefund({ deciderId: person.id, refundRequestId })
+        ).toEqual({ ok: false, refusal: "not-decider" });
+      }
+      expect(seats.pendingRefundRequests(bossy.id)).toHaveLength(1);
+      expect(seats.mayDecideRefunds(bossy.id)).toBe(false);
+      expect(seats.mayDecideRefunds(ana.id)).toBe(false);
+    });
+
+    it("refuses a Refund Request that has already been decided", () => {
+      const { admin, kim, bossy, open } = bossysPurchase();
+      const refundRequestId = pendingRequest(bossy.id, open.id);
+      seatsAt(local(3)).declineRefund({ deciderId: admin.id, refundRequestId });
+
+      const now = seatsAt(local(4));
+      expect(now.approveRefund({ deciderId: kim.id, refundRequestId })).toEqual(
+        { ok: false, refusal: "not-pending" }
+      );
+      expect(now.declineRefund({ deciderId: kim.id, refundRequestId })).toEqual(
+        { ok: false, refusal: "not-pending" }
+      );
+    });
+
+    it("refuses an unknown Refund Request", () => {
+      const { admin } = bossysPurchase();
+
+      expect(
+        seats.approveRefund({ deciderId: admin.id, refundRequestId: 999 })
+      ).toEqual({ ok: false, refusal: "unknown-refund-request" });
+    });
+  });
+
+  describe("the Refund Requests waiting for a decision", () => {
+    it("shows each with its course, Buyer, Seat holder, Refund Amount, Refund Reason and Seat Usage", () => {
+      const { admin, bossy, ana, course, taken } = bossysPurchase();
+      const [lesson1] = scenario.lessons(course, 4);
+      seatsAt(local(1)).enrollWithSeatCode({
+        studentId: ana.id,
+        seatCode: taken.code,
+        country: null,
+      });
+      scenario.watch(ana, lesson1, 600, local(1, 13).toISOString());
+      scenario.completeLesson(ana, lesson1, local(1, 13).toISOString());
+      // A Seat taken by another Student cannot be refunded, so the request
+      // is arranged directly; it can still be Pending (e.g. migrated data).
+      const request = scenario.requestRefund(taken, REASON, local(2).toISOString());
+
+      expect(seats.refundDecisions(admin.id)).toEqual([
+        {
+          id: request.id,
+          seatId: taken.id,
+          courseId: course.id,
+          courseTitle: course.title,
+          courseSlug: course.slug,
+          buyer: { id: bossy.id, name: "Bossy" },
+          holder: { id: ana.id, name: "Ana" },
+          refundAmount: 7900,
+          reason: REASON,
+          requestedAt: local(2).toISOString(),
+          seatUsage: { watchedSeconds: 600, completion: 0.25 },
+        },
+      ]);
+    });
+
+    it("lists every Pending Refund Request for an Admin, and only their own courses' for a Course Owner", () => {
+      const { admin, kim, bossy, open } = bossysPurchase();
+      const ola = scenario.person("Ola", UserRole.Instructor);
+      const olasCourse = scenario.course("Ola's course", 5000, { owner: ola });
+      const liam = scenario.person("Liam");
+      const bought = seatsAt(local(1)).personalPurchase({
+        buyerId: liam.id,
+        courseId: olasCourse.id,
+        country: null,
+      });
+      if (!bought.ok) throw new Error("Purchase refused");
+      const bossysRequest = pendingRequest(bossy.id, open.id);
+      const liamsRequest = pendingRequest(liam.id, bought.seatId);
+
+      const ids = (deciderId: number) =>
+        seats.refundDecisions(deciderId).map((r) => r.id);
+      expect(ids(admin.id)).toEqual([bossysRequest, liamsRequest]);
+      expect(ids(kim.id)).toEqual([bossysRequest]);
+      expect(ids(ola.id)).toEqual([liamsRequest]);
+      expect(ids(bossy.id)).toEqual([]);
+    });
+
+    it("leaves out decided Refund Requests", () => {
+      const { admin, bossy, open } = bossysPurchase();
+      const refundRequestId = pendingRequest(bossy.id, open.id);
+      seatsAt(local(3)).approveRefund({ deciderId: admin.id, refundRequestId });
+
+      expect(seats.refundDecisions(admin.id)).toEqual([]);
+    });
+  });
+
+  describe("on the Buyer's Settings", () => {
+    it("shows each decided Refund Request, with the Amount Refunded of an approval", () => {
+      const { admin, bossy, taken, open, course } = bossysPurchase();
+      const approved = pendingRequest(bossy.id, open.id);
+      const declined = pendingRequest(bossy.id, taken.id);
+      seatsAt(local(3)).approveRefund({ deciderId: admin.id, refundRequestId: approved });
+      seatsAt(local(4)).declineRefund({ deciderId: admin.id, refundRequestId: declined });
+
+      expect(seats.decidedRefundRequests(bossy.id)).toEqual([
+        {
+          id: declined,
+          seatId: taken.id,
+          courseTitle: course.title,
+          courseSlug: course.slug,
+          status: "declined",
+          amountRefunded: null,
+          decidedAt: local(4).toISOString(),
+        },
+        {
+          id: approved,
+          seatId: open.id,
+          courseTitle: course.title,
+          courseSlug: course.slug,
+          status: "approved",
+          amountRefunded: 7900,
+          decidedAt: local(3).toISOString(),
+        },
+      ]);
+    });
   });
 });

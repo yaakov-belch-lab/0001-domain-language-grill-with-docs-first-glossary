@@ -46,6 +46,7 @@ export default [
     route("settings", "routes/settings.tsx"),
     route("seats", "routes/seats.tsx"),
     route("seats/:seatId/refund", "routes/seats.$seatId.refund.ts"),
+    route("refunds", "routes/refunds.tsx"),
     route("team", "routes/team.tsx"),
     route("seat/:code", "routes/seat.$code.tsx"),
     route("redeem/:code", "routes/redeem.$code.tsx"),

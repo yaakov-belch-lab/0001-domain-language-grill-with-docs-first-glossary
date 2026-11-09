@@ -194,6 +194,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     countryTierInfo,
     countries: COUNTRIES,
     isBuyer: currentUserId ? createSeatsModule().isBuyer(currentUserId) : false,
+    mayDecideRefunds: currentUserId
+      ? createSeatsModule().mayDecideRefunds(currentUserId)
+      : false,
   };
 }
 
@@ -206,6 +209,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
     countryTierInfo,
     countries,
     isBuyer,
+    mayDecideRefunds,
   } = loaderData;
 
   return (
@@ -214,6 +218,7 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
         currentUser={currentUser}
         recentCourses={recentCourses}
         isBuyer={isBuyer}
+        mayDecideRefunds={mayDecideRefunds}
       />
       <main className="flex-1 overflow-y-auto">
         <Outlet />

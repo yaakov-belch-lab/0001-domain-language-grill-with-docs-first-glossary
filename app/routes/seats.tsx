@@ -301,6 +301,12 @@ export default function Seats({ loaderData }: Route.ComponentProps) {
                           </td>
                           <td className="px-4 py-3">
                             <SeatStateBadge state={seat.state} />
+                            {seat.amountRefunded !== null && (
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                Amount Refunded{" "}
+                                {formatPrice(seat.amountRefunded)}
+                              </div>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-muted-foreground">
                             {seat.holder?.name ?? "—"}

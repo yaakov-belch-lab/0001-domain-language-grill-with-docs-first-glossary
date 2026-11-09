@@ -13,6 +13,7 @@ import {
   Tag,
   Users,
   Ticket,
+  Undo2,
   Moon,
   Sun,
   LogOut,
@@ -40,6 +41,8 @@ interface SidebarProps {
   currentUser: CurrentUser | null;
   recentCourses?: RecentCourse[];
   isBuyer?: boolean;
+  // An Admin, or the Course Owner of at least one course.
+  mayDecideRefunds?: boolean;
 }
 
 interface NavItem {
@@ -110,6 +113,7 @@ export function Sidebar({
   currentUser,
   recentCourses = [],
   isBuyer = false,
+  mayDecideRefunds = false,
 }: SidebarProps) {
   const currentUserRole = currentUser?.role ?? null;
   const [isDark, setIsDark] = useState(false);
@@ -169,6 +173,22 @@ export function Sidebar({
           >
             <Ticket className="size-4" />
             My Seats
+          </NavLink>
+        )}
+        {mayDecideRefunds && (
+          <NavLink
+            to="/refunds"
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                isActive
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+              )
+            }
+          >
+            <Undo2 className="size-4" />
+            Refund Requests
           </NavLink>
         )}
       </nav>
