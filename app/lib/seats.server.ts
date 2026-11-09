@@ -116,6 +116,17 @@ export type EnrollmentEligibility =
   // `seat` is null only for an unknown Seat Code.
   | ({ eligible: false; seat: SeatHistory | null } & EnrollmentRefusal);
 
+/** The PPP Restriction Check on a person's access to course content. */
+export type PppRestrictionCheck =
+  | { blocked: false }
+  | {
+      blocked: true;
+      // The country of purchase the Seat may only be used from.
+      pppCountryRestriction: string;
+      // Where the person is now, or null when that is unknown.
+      country: string | null;
+    };
+
 export type Enrolled = {
   ok: true;
   enrollmentId: number;
@@ -356,6 +367,32 @@ export function createSeatsModule(
       : { eligible: true, seat: history };
   }
 
+  function pppRestrictionCheck(input: {
+    studentId: number;
+    courseId: number;
+    country: string | null;
+  }): PppRestrictionCheck {
+    const seatId = activeEnrollment(input.studentId, input.courseId)?.seatId;
+    if (seatId == null) return { blocked: false };
+    const purchase = db
+      .select({ pppCountryRestriction: purchases.pppCountryRestriction })
+      .from(seats)
+      .innerJoin(purchases, eq(seats.purchaseId, purchases.id))
+      .where(eq(seats.id, seatId))
+      .get();
+    const restriction = blockingRestriction(
+      purchase?.pppCountryRestriction ?? null,
+      input.country
+    );
+    return restriction === null
+      ? { blocked: false }
+      : {
+          blocked: true,
+          pppCountryRestriction: restriction,
+          country: input.country,
+        };
+  }
+
   function enroll(
     tx: SeatsDatabase,
     studentId: number,
@@ -519,6 +556,13 @@ export function createSeatsModule(
 
     /** A person's active Enrollment in a course, and its Seat. */
     activeEnrollment,
+
+    /**
+     * The PPP Restriction Check on course content: whether the PPP Country
+     * Restriction of the Purchase behind the person's active Enrollment
+     * blocks them in their current country.
+     */
+    pppRestrictionCheck,
   };
 }
 
@@ -574,14 +618,31 @@ export function decideEnrollmentEligibility(
 
   if (person.alreadyEnrolled) return { refusal: "already-enrolled" };
 
-  // The PPP Restriction Check applies only to Purchases made with a PPP
-  // Discount (#8).
-  const restriction = history.pppCountryRestriction;
-  if (restriction !== null && person.country !== restriction) {
+  const restriction = blockingRestriction(
+    history.pppCountryRestriction,
+    person.country
+  );
+  if (restriction !== null) {
     return { refusal: "country-mismatch", country: restriction };
   }
 
   return null;
+}
+
+/**
+ * The PPP Restriction Check, the same wherever a Seat is enrolled on or its
+ * content is accessed. It applies only to Purchases with a PPP Country
+ * Restriction (#8). An unknown country cannot be shown to be the country of
+ * purchase, so it fails. Returns the PPP Country Restriction that blocks
+ * the person, or null when they pass.
+ */
+function blockingRestriction(
+  pppCountryRestriction: string | null,
+  country: string | null
+): string | null {
+  return pppCountryRestriction !== null && country !== pppCountryRestriction
+    ? pppCountryRestriction
+    : null;
 }
 
 function newSeatCode() {

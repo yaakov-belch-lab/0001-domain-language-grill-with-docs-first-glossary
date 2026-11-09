@@ -1,16 +1,12 @@
 import { data } from "react-router";
-import { eq, and } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db } from "~/db";
-import {
-  UserRole,
-  users,
-  courses,
-  enrollments,
-  purchases,
-} from "~/db/schema";
+import { UserRole, users, courses } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
-import { checkPppAccess } from "~/lib/ppp";
+import { createSeatsModule } from "~/lib/seats.server";
+
+const seats = createSeatsModule();
 
 function getUserById(id: number) {
   return db.select().from(users).where(eq(users.id, id)).get();
@@ -18,28 +14,6 @@ function getUserById(id: number) {
 
 function getCourseById(id: number) {
   return db.select().from(courses).where(eq(courses.id, id)).get();
-}
-
-function findEnrollment(userId: number, courseId: number) {
-  return db
-    .select()
-    .from(enrollments)
-    .where(
-      and(eq(enrollments.userId, userId), eq(enrollments.courseId, courseId))
-    )
-    .get();
-}
-
-function isUserEnrolled(userId: number, courseId: number) {
-  return !!findEnrollment(userId, courseId);
-}
-
-function findPurchase(userId: number, courseId: number) {
-  return db
-    .select()
-    .from(purchases)
-    .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
-    .get();
 }
 
 // ─── Access Resolution ───
@@ -97,25 +71,18 @@ export async function getAccess(
   const isAdmin = user.role === UserRole.Admin;
   const isOwningInstructor = course?.instructorId === userId;
   const isStaff = isAdmin || isOwningInstructor;
-  const enrolled = isUserEnrolled(userId, courseId);
+  const enrolled = !!seats.activeEnrollment(userId, courseId);
 
-  // PPP only restricts students who bought at a discount — staff are exempt.
-  let ppp = {
-    blocked: false,
-    blockedCountry: null as string | null,
-    purchaseCountry: null as string | null,
-  };
-
-  if (enrolled && !isStaff && course) {
-    const purchase = findPurchase(userId, courseId);
-    const currentCountry = await resolveCountry(request);
-    ppp = checkPppAccess(
-      course.price,
-      course.pppEnabled,
-      purchase?.country ?? null,
-      currentCountry
-    );
-  }
+  // The PPP Restriction Check uses the PPP Country Restriction of the
+  // Purchase behind the active Enrollment, for every Student. Staff are exempt.
+  const ppp =
+    enrolled && !isStaff
+      ? seats.pppRestrictionCheck({
+          studentId: userId,
+          courseId,
+          country: await resolveCountry(request),
+        })
+      : ({ blocked: false } as const);
 
   return {
     userId,
@@ -125,8 +92,8 @@ export async function getAccess(
     isStaff,
     enrolled,
     pppBlocked: ppp.blocked,
-    pppBlockedCountry: ppp.blockedCountry,
-    pppPurchaseCountry: ppp.purchaseCountry,
+    pppBlockedCountry: ppp.blocked ? ppp.country : null,
+    pppPurchaseCountry: ppp.blocked ? ppp.pppCountryRestriction : null,
     canViewContent: isStaff || (enrolled && !ppp.blocked),
   };
 }

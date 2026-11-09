@@ -22,7 +22,7 @@ Terms are defined in [GLOSSARY.md](../GLOSSARY.md). The model is in [ADR 0001](a
 | **Usage Limits** | Watch limit: 2 hours, where watched time is the sum, over the course's lessons, of the furthest video position reached in each. Completion limit: 50% of the course's lessons completed. |
 | **Refund Amount** | The Amount Paid if the country of purchase has a PPP Discount; otherwise the current Course Price. |
 | **Refund Approval / Decline** | Not implemented. |
-| **PPP Restriction Check** (content access) | Applies when the course currently has PPP enabled and the country of purchase is in a discounted tier. |
+| **PPP Restriction Check** (content access) | Decided by the seats module: applies the PPP Country Restriction of the Purchase behind the Student's active Enrollment, whether they made the Purchase or enrolled with a Seat Code. A Purchase without one is never blocked, even if the course enables PPP later. An unknown current country fails the check. Admins and Course Owners are exempt. |
 | **PPP Restriction Check** (Seat Code) | Applies only to Purchases with a PPP Country Restriction. |
 
 ## Bugs: code that contradicts the model
@@ -36,7 +36,7 @@ Bugs 1–10 are GitHub issues #1–#10. Bug 11 belongs to the migration to the m
 5. (#5) Refund Approval and Refund Decline do not exist, so no money is ever given back and no Enrollment ever ends.
 6. (#6) A Refund Request can be made again for a Seat whose request was approved, because only pending requests are checked.
 7. (#7) Unenrollment does not exist.
-8. (#8, enrollment side fixed in #13) The PPP Country Restriction is inferred from the country of purchase, not from whether a PPP Discount was given. The check on Seat Codes applies it to full-price Purchases, and the check on content access skips Students enrolled through a Seat Code.
+8. (#8, fixed: enrollment side in #13, content access in #15) The PPP Country Restriction is inferred from the country of purchase, not from whether a PPP Discount was given. The check on Seat Codes applies it to full-price Purchases, and the check on content access skips Students enrolled through a Seat Code.
 9. (#9) Completion is never recorded by the app: `enrollments.completed_at` is set only by the seed.
 10. (#10) The UI names the same thing "Cancel my purchase", "Reversal" (email) and "Chargeback" (settings). The settings page shows the Amount Paid, while the form and email show a different amount.
 11. Team language (team, team admin, coupon, redeem, redemption link) contradicts the model in ADR 0001.

@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { eq } from "drizzle-orm";
+import * as schema from "~/db/schema";
 import { createTestDb, type TestDb } from "~/test/setup";
 import { seatScenario } from "~/test/seat-scenarios";
 import { UnenrollmentInitiator } from "~/db/schema";
@@ -748,5 +750,149 @@ describe("Enrollment Eligibility with a Seat Code", () => {
         country: "US",
       }).ok
     ).toBe(true);
+  });
+});
+
+describe("the PPP Restriction Check on course content", () => {
+  function restrictedCourse() {
+    return scenario.course("Building REST APIs", 5999, { pppEnabled: true });
+  }
+
+  it("blocks a Buyer on their own Seat of a restricted Purchase outside the country of purchase", () => {
+    const priya = scenario.person("Priya");
+    const course = restrictedCourse();
+    const { seats: bought } = scenario.purchase(priya, course, {
+      seatPrice: 3000,
+      pppCountryRestriction: "IN",
+      at: "2026-11-01T10:00:00.000Z",
+    });
+    scenario.enroll(priya, bought[0], "2026-11-01T10:00:00.000Z");
+
+    const check = (country: string | null) =>
+      seats.pppRestrictionCheck({
+        studentId: priya.id,
+        courseId: course.id,
+        country,
+      });
+
+    expect(check("US")).toEqual({
+      blocked: true,
+      pppCountryRestriction: "IN",
+      country: "US",
+    });
+    // An unknown country cannot be shown to be the country of purchase.
+    expect(check(null)).toEqual({
+      blocked: true,
+      pppCountryRestriction: "IN",
+      country: null,
+    });
+    expect(check("IN")).toEqual({ blocked: false });
+  });
+
+  it("checks a Student enrolled with a Seat Code exactly like the Buyer", () => {
+    const bossy = scenario.person("Bossy");
+    const ana = scenario.person("Ana");
+    const course = restrictedCourse();
+    const made = seats.buySeats({
+      buyerId: bossy.id,
+      courseId: course.id,
+      seatCount: 2,
+      country: "IN",
+    });
+    expect(
+      seats.enrollWithSeatCode({
+        studentId: ana.id,
+        seatCode: made.seats[0].code,
+        country: "IN",
+      }).ok
+    ).toBe(true);
+
+    expect(
+      seats.pppRestrictionCheck({
+        studentId: ana.id,
+        courseId: course.id,
+        country: "US",
+      })
+    ).toEqual({ blocked: true, pppCountryRestriction: "IN", country: "US" });
+    expect(
+      seats.pppRestrictionCheck({
+        studentId: ana.id,
+        courseId: course.id,
+        country: "IN",
+      })
+    ).toEqual({ blocked: false });
+  });
+
+  it("never blocks a Student whose Purchase has no PPP Country Restriction, even if the course enables PPP later", () => {
+    const liam = scenario.person("Liam");
+    const course = scenario.course("Introduction to TypeScript", 7900, {
+      pppEnabled: false,
+    });
+    // Bought from a discounted country while the course had no PPP.
+    const bought = seats.personalPurchase({
+      buyerId: liam.id,
+      courseId: course.id,
+      country: "IN",
+    });
+    expect(bought.ok).toBe(true);
+
+    db.update(schema.courses)
+      .set({ pppEnabled: true })
+      .where(eq(schema.courses.id, course.id))
+      .run();
+
+    expect(
+      seats.pppRestrictionCheck({
+        studentId: liam.id,
+        courseId: course.id,
+        country: "US",
+      })
+    ).toEqual({ blocked: false });
+  });
+
+  it("uses the Purchase behind the active Enrollment, not an earlier one", () => {
+    const priya = scenario.person("Priya");
+    const course = restrictedCourse();
+    const restricted = scenario.purchase(priya, course, {
+      seatPrice: 3000,
+      pppCountryRestriction: "IN",
+      at: "2026-10-01T10:00:00.000Z",
+    });
+    const first = scenario.enroll(
+      priya,
+      restricted.seats[0],
+      "2026-10-01T10:00:00.000Z"
+    );
+    scenario.unenroll(
+      first,
+      UnenrollmentInitiator.Student,
+      "2026-10-05T10:00:00.000Z"
+    );
+    const fullPrice = scenario.purchase(priya, course, {
+      seatPrice: 5999,
+      at: "2026-11-01T10:00:00.000Z",
+    });
+    scenario.enroll(priya, fullPrice.seats[0], "2026-11-01T10:00:00.000Z");
+
+    expect(
+      seats.pppRestrictionCheck({
+        studentId: priya.id,
+        courseId: course.id,
+        country: "US",
+      })
+    ).toEqual({ blocked: false });
+  });
+
+  it("does not block someone with no active Enrollment", () => {
+    const ana = scenario.person("Ana");
+    const course = restrictedCourse();
+
+    expect(
+      seats.pppRestrictionCheck({
+        studentId: ana.id,
+        courseId: course.id,
+        country: "US",
+      })
+    ).toEqual({ blocked: false });
   });
 });
